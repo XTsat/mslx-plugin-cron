@@ -7,8 +7,8 @@
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
     <OutputType>Library</OutputType>
     <GenerateDependencyFile>false</GenerateDependencyFile>
-    <Generate>false</Generate>
     <DebugType>none</DebugType>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,10 +17,9 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.7" />
-    <PackageReference Include="MSLX.SDK" Version="1.0.3">
-      <PrivateAssets>all</PrivateAssets>
-      <ExcludeAssets>runtime</ExcludeAssets>
-    </PackageReference>
+    <PackageReference Include="Cronos" Version="0.13.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="MSLX.SDK" Version="1.6.3.3-dev-202609171123" ExcludeAssets="runtime"/>
   </ItemGroup>
 
   <ItemGroup>
@@ -64,11 +63,12 @@
     <ILRepack
             Condition="'@(DependenciesToMerge)' != ''"
             Parallel="true"
-            Internalize="true"
+            Internalize="false"
+            CopyAttributes="true"
             InputAssemblies="@(FinalInputAssemblies)"
             TargetKind="SameAsPrimaryAssembly"
             OutputFile="$(OutputPath)$(AssemblyName).dll"
-            LibraryPath="$(OutputPath)" />
+            LibraryPath="$(OutputPath);$(NuGetPackageRoot)mslx.sdk/1.6.3.3-dev-202609171123/lib/net10.0" />
 
     <Delete Files="@(DependenciesToMerge)" Condition="'@(DependenciesToMerge)' != ''" />
     <Delete Files="@(GarbageFiles)" />

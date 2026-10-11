@@ -1,5 +1,5 @@
 {
-  "name": "mslx-plugin-demo",
+  "name": "mslx-plugin-cron",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,9 +11,11 @@
     "dev:plugin": "concurrently -n \"BUILD,SERVE\" -c \"blue,green\" \"pnpm build:watch\" \"pnpm preview\""
   },
   "dependencies": {
+    "cron-parser": "^5.10.2",
     "vue": "^3.5.32"
   },
   "devDependencies": {
+    "@types/node": "^26.6.5",
     "@vitejs/plugin-vue": "^6.0.6",
     "@vue/tsconfig": "^0.9.1",
     "concurrently": "^9.2.1",

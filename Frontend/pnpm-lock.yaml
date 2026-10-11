@@ -8,16 +8,19 @@ importers:
 
   .:
     dependencies:
+      cron-parser:
+        specifier: ^5.10.2
+        version: 5.10.2
       vue:
         specifier: ^3.5.32
         version: 3.5.33(typescript@6.0.3)
     devDependencies:
       '@types/node':
-        specifier: ^24.12.2
-        version: 24.12.2
+        specifier: ^26.6.5
+        version: 26.6.5
       '@vitejs/plugin-vue':
         specifier: ^6.0.6
-        version: 6.0.6(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))(vue@3.5.33(typescript@6.0.3))
+        version: 6.0.6(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))(vue@3.5.33(typescript@6.0.3))
       '@vue/tsconfig':
         specifier: ^0.9.1
         version: 0.9.1(typescript@6.0.3)(vue@3.5.33(typescript@6.0.3))
@@ -38,19 +41,19 @@ importers:
         version: 6.0.3
       unocss:
         specifier: ^66.6.8
-        version: 66.6.8(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))
+        version: 66.6.8(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))
       unplugin-vue-components:
         specifier: ^32.0.0
         version: 32.0.0(vue@3.5.33(typescript@6.0.3))
       vite:
         specifier: ^7.3.2
-        version: 7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
+        version: 7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
       vite-plugin-css-injected-by-js:
         specifier: ^5.0.1
-        version: 5.0.1(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))
+        version: 5.0.1(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))
       vite-plugin-external:
         specifier: ^6.2.2
-        version: 6.2.2
+        version: 6.2.2(supports-color@8.1.1)
       vue-tsc:
         specifier: ^3.2.7
         version: 3.2.7(typescript@6.0.3)
@@ -581,6 +584,9 @@ packages:
   '@types/node@24.12.2':
     resolution: {integrity: sha512-A1sre26ke7HDIuY/M23nd9gfB+nrmhtYyMINbjI1zHJxYteKR6qSMX56FsmjMcDb3SMcjJg5BiRRgOCC/yBD0g==}
 
+  '@types/node@26.6.5':
+    resolution: {integrity: sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg==}
+
   '@types/sortablejs@1.15.9':
     resolution: {integrity: sha512-7HP+rZGE2p886PKV9c9OJzLBI6BBJu1O7lJGYnPyG3fS4/duUCcngkNCjsLwIMV+WMqANe3tt4irrXHSIe68OQ==}
 
@@ -791,6 +797,10 @@ packages:
   copy-anything@3.0.5:
     resolution: {integrity: sha512-yCEafptTtb4bk7GLEQoM8KVJpxAfdBJYaXyzQEgQQQgYrZiDp8SJmGKlYza6CYjEDNstAdNdKA3UuoULlEbS6w==}
     engines: {node: '>=12.13'}
+
+  cron-parser@5.10.2:
+    resolution: {integrity: sha512-JfAYMY0LZaWQTuict8PhtF/ksSnq8xefSDmQUnnoqvkPYkU/y3UP0DTWzJKFBz0P1IXsDG8q0vY3zHkoFZOhvw==}
+    engines: {node: '>=18'}
 
   css-tree@3.2.1:
     resolution: {integrity: sha512-X7sjQzceUhu1u7Y/ylrRZFU2FS6LRiFVp6rKLPg23y3x3c3DOKAwuXGDp+PAGjh6CSnCjYeAul8pcT8bAl+lSA==}
@@ -1006,6 +1016,10 @@ packages:
 
   lodash-es@4.18.1:
     resolution: {integrity: sha512-J8xewKD/Gk22OZbhpOVSwcs60zhd95ESDwezOFuA3/099925PdHJ7OFHNTGtajL3AlZkykD32HykiMo+BIBI8A==}
+
+  luxon@3.7.2:
+    resolution: {integrity: sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew==}
+    engines: {node: '>=12'}
 
   magic-regexp@0.10.0:
     resolution: {integrity: sha512-Uly1Bu4lO1hwHUW0CQeSWuRtzCMNO00CmXtS8N6fyvB3B979GOEEeAkiTUDsmbYLAbvpUS/Kt5c4ibosAzVyVg==}
@@ -1233,6 +1247,9 @@ packages:
 
   undici-types@7.16.0:
     resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
+
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   universalify@2.0.1:
     resolution: {integrity: sha512-gptHNQghINnc/vTGIk0SOFGFNXw7JVrlRUtConJRlvaw6DuX0wO5Jeko9sWrMBhh+PsYAZ7oXAiOnf/UKogyiw==}
@@ -1702,6 +1719,10 @@ snapshots:
     dependencies:
       undici-types: 7.16.0
 
+  '@types/node@26.6.5':
+    dependencies:
+      undici-types: 8.9.0
+
   '@types/sortablejs@1.15.9': {}
 
   '@types/tinycolor2@1.4.6': {}
@@ -1827,7 +1848,7 @@ snapshots:
     dependencies:
       '@unocss/core': 66.6.8
 
-  '@unocss/vite@66.6.8(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))':
+  '@unocss/vite@66.6.8(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))':
     dependencies:
       '@jridgewell/remapping': 2.3.5
       '@unocss/config': 66.6.8
@@ -1838,12 +1859,12 @@ snapshots:
       pathe: 2.0.3
       tinyglobby: 0.2.16
       unplugin-utils: 0.3.1
-      vite: 7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
+      vite: 7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
 
-  '@vitejs/plugin-vue@6.0.6(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))(vue@3.5.33(typescript@6.0.3))':
+  '@vitejs/plugin-vue@6.0.6(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))(vue@3.5.33(typescript@6.0.3))':
     dependencies:
       '@rolldown/pluginutils': 1.0.0-rc.13
-      vite: 7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
+      vite: 7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
       vue: 3.5.33(typescript@6.0.3)
 
   '@volar/language-core@2.4.28':
@@ -1947,13 +1968,13 @@ snapshots:
       base-log-factory: 2.1.4
       picocolors: 1.1.1
 
-  blf-debug-appender@1.0.5:
+  blf-debug-appender@1.0.5(supports-color@8.1.1):
     dependencies:
       '@types/debug': 4.1.13
       base-log-factory: 2.1.4
       blf-colorful-appender: 1.0.6
       date-manip: 2.0.6
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@8.1.1)
     transitivePeerDependencies:
       - supports-color
 
@@ -2003,6 +2024,10 @@ snapshots:
     dependencies:
       is-what: 4.1.16
 
+  cron-parser@5.10.2:
+    dependencies:
+      luxon: 3.7.2
+
   css-tree@3.2.1:
     dependencies:
       mdn-data: 2.27.1
@@ -2014,9 +2039,11 @@ snapshots:
 
   dayjs@1.11.20: {}
 
-  debug@4.4.3:
+  debug@4.4.3(supports-color@8.1.1):
     dependencies:
       ms: 2.1.3
+    optionalDependencies:
+      supports-color: 8.1.1
 
   defu@6.1.7: {}
 
@@ -2194,6 +2221,8 @@ snapshots:
       quansync: 0.2.11
 
   lodash-es@4.18.1: {}
+
+  luxon@3.7.2: {}
 
   magic-regexp@0.10.0:
     dependencies:
@@ -2469,9 +2498,11 @@ snapshots:
 
   undici-types@7.16.0: {}
 
+  undici-types@8.9.0: {}
+
   universalify@2.0.1: {}
 
-  unocss@66.6.8(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)):
+  unocss@66.6.8(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)):
     dependencies:
       '@unocss/cli': 66.6.8
       '@unocss/core': 66.6.8
@@ -2489,7 +2520,7 @@ snapshots:
       '@unocss/transformer-compile-class': 66.6.8
       '@unocss/transformer-directives': 66.6.8
       '@unocss/transformer-variant-group': 66.6.8
-      '@unocss/vite': 66.6.8(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))
+      '@unocss/vite': 66.6.8(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0))
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@emnapi/runtime'
@@ -2528,20 +2559,20 @@ snapshots:
 
   validator@13.15.35: {}
 
-  vite-plugin-css-injected-by-js@5.0.1(vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)):
+  vite-plugin-css-injected-by-js@5.0.1(vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)):
     dependencies:
-      vite: 7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
+      vite: 7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0)
 
-  vite-plugin-external@6.2.2:
+  vite-plugin-external@6.2.2(supports-color@8.1.1):
     dependencies:
       '@types/fs-extra': 11.0.4
       fs-extra: 11.3.4
       is-what-type: 1.1.4
-      vp-runtime-helper: 1.0.10
+      vp-runtime-helper: 1.0.10(supports-color@8.1.1)
     transitivePeerDependencies:
       - supports-color
 
-  vite@7.3.2(@types/node@24.12.2)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0):
+  vite@7.3.2(@types/node@26.6.5)(jiti@2.6.1)(less@4.6.4)(lightningcss@1.32.0):
     dependencies:
       esbuild: 0.27.7
       fdir: 6.5.0(picomatch@4.0.4)
@@ -2550,17 +2581,17 @@ snapshots:
       rollup: 4.60.2
       tinyglobby: 0.2.16
     optionalDependencies:
-      '@types/node': 24.12.2
+      '@types/node': 26.6.5
       fsevents: 2.3.3
       jiti: 2.6.1
       less: 4.6.4
       lightningcss: 1.32.0
 
-  vp-runtime-helper@1.0.10:
+  vp-runtime-helper@1.0.10(supports-color@8.1.1):
     dependencies:
       '@types/fs-extra': 11.0.4
       base-log-factory: 2.1.4
-      blf-debug-appender: 1.0.5
+      blf-debug-appender: 1.0.5(supports-color@8.1.1)
       figlet: 1.11.0
       fs-extra: 11.3.4
       picocolors: 1.1.1

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    Replaces the default ILRepack target shipped inside ILRepack.Lib.MSBuild.Task
+    (see ~/.nuget/packages/ilrepack.lib.msbuild.task/2.0.44.2/build/ILRepack.Lib.MSBuild.Task.targets)
+    to prevent double-execution. The project-level MergeDependencies target in
+    MSLX.Plugin.Cron.csproj performs the actual merge with a LibraryPath that
+    resolves MSLX.SDK from the NuGet cache without merging it.
+  -->
+</Project>
