@@ -124,25 +124,34 @@ public class CronTaskController : ControllerBase
             return Forbidden("仅管理员可创建 shell 类型的定时任务");
         }
 
-        var tasks = _store.LoadTasks();
-        var task = new CronTaskDefinition
+        CronTaskDefinition? created = null;
+        var result = _store.UpdateTasks(tasks =>
         {
-            Name = request.Name,
-            Cron = request.Cron,
-            Type = request.Type,
-            Payload = request.Payload,
-            Enable = request.Enable,
-            RunWhenOffline = request.RunWhenOffline,
-            Bindings = request.InstanceIds
-                .Distinct()
-                .Select(i => new TaskBinding { InstanceId = i, LastRunTime = null })
-                .ToList()
-        };
-        tasks.Add(task);
-        _store.SaveTasks(tasks);
+            var task = new CronTaskDefinition
+            {
+                Name = request.Name,
+                Cron = request.Cron,
+                Type = request.Type,
+                Payload = request.Payload,
+                Enable = request.Enable,
+                RunWhenOffline = request.RunWhenOffline,
+                Bindings = request.InstanceIds
+                    .Distinct()
+                    .Select(i => new TaskBinding { InstanceId = i, LastRunTime = null })
+                    .ToList()
+            };
+            tasks.Add(task);
+            created = task;
+            return tasks;
+        });
 
-        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 创建任务 [{task.Name}] 绑定 {task.Bindings.Count} 台服务器");
-        return Ok(new ApiResponse<string> { Code = 200, Message = "任务创建成功", Data = task.Id });
+        if (result == null)
+        {
+            return BadRequestMsg("任务创建失败，请重试");
+        }
+
+        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 创建任务 [{created!.Name}] 绑定 {created.Bindings.Count} 台服务器");
+        return Ok(new ApiResponse<string> { Code = 200, Message = "任务创建成功", Data = created.Id });
     }
 
     /// <summary>更新多服任务（bindings 按 InstanceId 重建，保留原 LastRunTime）</summary>
@@ -159,60 +168,80 @@ public class CronTaskController : ControllerBase
             });
         }
 
-        var tasks = _store.LoadTasks();
-        var existing = tasks.FirstOrDefault(t => t.Id == request.Id);
-        if (existing == null)
+        // 查找、权限校验与修改在同一事务内完成，防止并发期间任务被其它请求改动
+        string? forbidMessage = null;
+        string? updatedName = null;
+        int updatedBindingCount = 0;
+        var result = _store.UpdateTasks(tasks =>
         {
+            var existing = tasks.FirstOrDefault(t => t.Id == request.Id);
+            if (existing == null)
+            {
+                return null;
+            }
+
+            // 权限：原绑定与目标服务器都需有权限
+            if (!IsAdmin)
+            {
+                foreach (var binding in existing.Bindings)
+                {
+                    if (!HasPermission(binding.InstanceId))
+                    {
+                        forbidMessage = $"你对服务器 {binding.InstanceId} 没有操作权限";
+                        return null;
+                    }
+                }
+            }
+
+            foreach (var instanceId in request.InstanceIds)
+            {
+                if (!HasPermission(instanceId))
+                {
+                    forbidMessage = $"你对服务器 {instanceId} 没有操作权限";
+                    return null;
+                }
+            }
+
+            if (request.Type.ToLower() == "shell" && !IsAdmin)
+            {
+                forbidMessage = "仅管理员可创建 shell 类型的定时任务";
+                return null;
+            }
+
+            var oldRunTimes = existing.Bindings.ToDictionary(b => b.InstanceId, b => b.LastRunTime);
+            var newBindings = new List<TaskBinding>();
+            foreach (var instanceId in request.InstanceIds.Distinct())
+            {
+                newBindings.Add(new TaskBinding
+                {
+                    InstanceId = instanceId,
+                    LastRunTime = oldRunTimes.TryGetValue(instanceId, out var last) ? last : null
+                });
+            }
+
+            existing.Name = request.Name;
+            existing.Cron = request.Cron;
+            existing.Type = request.Type;
+            existing.Payload = request.Payload;
+            existing.Enable = request.Enable;
+            existing.RunWhenOffline = request.RunWhenOffline;
+            existing.Bindings = newBindings;
+            updatedName = existing.Name;
+            updatedBindingCount = newBindings.Count;
+            return tasks;
+        });
+
+        if (result == null)
+        {
+            if (forbidMessage != null)
+            {
+                return Forbidden(forbidMessage);
+            }
+
             return NotFoundMsg("未找到指定 ID 的任务");
         }
 
-        // 权限：原绑定与目标服务器都需有权限
-        if (!IsAdmin)
-        {
-            foreach (var binding in existing.Bindings)
-            {
-                if (!HasPermission(binding.InstanceId))
-                {
-                    return Forbidden($"你对服务器 {binding.InstanceId} 没有操作权限");
-                }
-            }
-        }
-
-        foreach (var instanceId in request.InstanceIds)
-        {
-            if (!HasPermission(instanceId))
-            {
-                return Forbidden($"你对服务器 {instanceId} 没有操作权限");
-            }
-        }
-
-        if (request.Type.ToLower() == "shell" && !IsAdmin)
-        {
-            return Forbidden("仅管理员可创建 shell 类型的定时任务");
-        }
-
-        var oldRunTimes = existing.Bindings.ToDictionary(b => b.InstanceId, b => b.LastRunTime);
-        var newBindings = new List<TaskBinding>();
-        foreach (var instanceId in request.InstanceIds.Distinct())
-        {
-            newBindings.Add(new TaskBinding
-            {
-                InstanceId = instanceId,
-                LastRunTime = oldRunTimes.TryGetValue(instanceId, out var last) ? last : null
-            });
-        }
-
-        existing.Name = request.Name;
-        existing.Cron = request.Cron;
-        existing.Type = request.Type;
-        existing.Payload = request.Payload;
-        existing.Enable = request.Enable;
-        existing.RunWhenOffline = request.RunWhenOffline;
-        existing.Bindings = newBindings;
-
-        _store.SaveTasks(tasks);
-
-        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 更新任务 [{existing.Name}] 绑定 {existing.Bindings.Count} 台服务器");
+        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 更新任务 [{updatedName}] 绑定 {updatedBindingCount} 台服务器");
         return Ok(new ApiResponse<object> { Code = 200, Message = "任务更新成功" });
     }
 
@@ -220,27 +249,44 @@ public class CronTaskController : ControllerBase
     [HttpPost("delete/{id}")]
     public IActionResult Delete(string id)
     {
-        var tasks = _store.LoadTasks();
-        var task = tasks.FirstOrDefault(t => t.Id == id);
-        if (task == null)
+        string? forbidMessage = null;
+        string? deletedName = null;
+        var result = _store.UpdateTasks(tasks =>
         {
+            var task = tasks.FirstOrDefault(t => t.Id == id);
+            if (task == null)
+            {
+                return null;
+            }
+
+            if (!IsAdmin)
+            {
+                foreach (var binding in task.Bindings)
+                {
+                    if (!HasPermission(binding.InstanceId))
+                    {
+                        forbidMessage = $"你对服务器 {binding.InstanceId} 没有操作权限";
+                        return null;
+                    }
+                }
+            }
+
+            tasks.Remove(task);
+            deletedName = task.Name;
+            return tasks;
+        });
+
+        if (result == null)
+        {
+            if (forbidMessage != null)
+            {
+                return Forbidden(forbidMessage);
+            }
+
             return BadRequestMsg("删除失败，未找到指定 ID 的任务");
         }
 
-        if (!IsAdmin)
-        {
-            foreach (var binding in task.Bindings)
-            {
-                if (!HasPermission(binding.InstanceId))
-                {
-                    return Forbidden($"你对服务器 {binding.InstanceId} 没有操作权限");
-                }
-            }
-        }
-
-        tasks.Remove(task);
-        _store.SaveTasks(tasks);
-        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 删除任务 [{task.Name}]");
+        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 删除任务 [{deletedName}]");
         return Ok(new ApiResponse<object> { Code = 200, Message = "任务已删除" });
     }
 
@@ -248,27 +294,44 @@ public class CronTaskController : ControllerBase
     [HttpPost("toggle/{id}")]
     public IActionResult Toggle(string id)
     {
-        var tasks = _store.LoadTasks();
-        var task = tasks.FirstOrDefault(t => t.Id == id);
-        if (task == null)
+        string? forbidMessage = null;
+        bool? newEnable = null;
+        var result = _store.UpdateTasks(tasks =>
         {
+            var task = tasks.FirstOrDefault(t => t.Id == id);
+            if (task == null)
+            {
+                return null;
+            }
+
+            if (!IsAdmin)
+            {
+                foreach (var binding in task.Bindings)
+                {
+                    if (!HasPermission(binding.InstanceId))
+                    {
+                        forbidMessage = $"你对服务器 {binding.InstanceId} 没有操作权限";
+                        return null;
+                    }
+                }
+            }
+
+            task.Enable = !task.Enable;
+            newEnable = task.Enable;
+            return tasks;
+        });
+
+        if (result == null)
+        {
+            if (forbidMessage != null)
+            {
+                return Forbidden(forbidMessage);
+            }
+
             return BadRequestMsg("未找到指定 ID 的任务");
         }
 
-        if (!IsAdmin)
-        {
-            foreach (var binding in task.Bindings)
-            {
-                if (!HasPermission(binding.InstanceId))
-                {
-                    return Forbidden($"你对服务器 {binding.InstanceId} 没有操作权限");
-                }
-            }
-        }
-
-        task.Enable = !task.Enable;
-        _store.SaveTasks(tasks);
-        return Ok(new ApiResponse<object> { Code = 200, Message = task.Enable ? "任务已启用" : "任务已停用" });
+        return Ok(new ApiResponse<object> { Code = 200, Message = newEnable == true ? "任务已启用" : "任务已停用" });
     }
 
     /// <summary>立即执行一次（对全部绑定服务器，同步等待结果）</summary>

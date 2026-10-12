@@ -91,13 +91,19 @@ public class CronSchedulerService : IDisposable
     private async Task ProcessAsync()
     {
         var nowUtc = DateTime.UtcNow;
-        var tasks = _store.LoadTasks().Where(t => t.Enable).ToList();
+        // 加载完整列表（含停用任务）：只对启用任务调度，但写回时不能把停用任务覆盖丢失
+        var tasks = _store.LoadTasks();
 
         var due = new List<(CronTaskDefinition Task, uint InstanceId)>();
-        var dirty = false;
+        var updates = new List<(string TaskId, uint InstanceId, DateTime LastRunTime)>();
 
         foreach (var task in tasks)
         {
+            if (!task.Enable)
+            {
+                continue;
+            }
+
             foreach (var binding in task.Bindings)
             {
                 if (!ShouldRun(task.Cron, binding.LastRunTime, nowUtc))
@@ -105,16 +111,15 @@ public class CronSchedulerService : IDisposable
                     continue;
                 }
 
-                // 先更新 LastRunTime 并落盘，避免崩溃后重复触发
-                binding.LastRunTime = nowUtc;
                 due.Add((task, binding.InstanceId));
-                dirty = true;
+                updates.Add((task.Id, binding.InstanceId, nowUtc));
             }
         }
 
-        if (dirty)
+        // 单事务写回到期绑定的 LastRunTime，避免崩溃后重复触发；任务列表整体不会被旧快照覆盖
+        if (updates.Count > 0)
         {
-            _store.SaveTasks(tasks);
+            _store.UpdateBindingsLastRunTime(updates);
         }
 
         foreach (var (task, instanceId) in due)

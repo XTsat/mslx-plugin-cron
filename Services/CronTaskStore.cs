@@ -28,21 +28,7 @@ public class CronTaskStore
     {
         lock (_lock)
         {
-            if (!File.Exists(_tasksPath))
-            {
-                return new List<CronTaskDefinition>();
-            }
-
-            try
-            {
-                var json = File.ReadAllText(_tasksPath);
-                return JsonConvert.DeserializeObject<List<CronTaskDefinition>>(json) ?? new List<CronTaskDefinition>();
-            }
-            catch (Exception ex)
-            {
-                MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 读取 cron-tasks.json 失败", ex);
-                return new List<CronTaskDefinition>();
-            }
+            return LoadTasksLocked();
         }
     }
 
@@ -50,10 +36,86 @@ public class CronTaskStore
     {
         lock (_lock)
         {
-            Directory.CreateDirectory(_dataPath);
-            var json = JsonConvert.SerializeObject(tasks, Formatting.Indented);
-            AtomicWrite(_tasksPath, json);
+            SaveTasksLocked(tasks);
         }
+    }
+
+    /// <summary>
+    /// 在单把锁内完成「读取 → 修改 → 保存」完整事务，防止并发下旧快照覆盖新数据。
+    /// transform 就地修改任务列表并原样返回；返回 null 表示放弃本次修改（不落盘）。
+    /// </summary>
+    public List<CronTaskDefinition>? UpdateTasks(
+        Func<List<CronTaskDefinition>, List<CronTaskDefinition>?> transform)
+    {
+        lock (_lock)
+        {
+            var tasks = LoadTasksLocked();
+            var result = transform(tasks);
+            if (result == null)
+            {
+                return null;
+            }
+
+            SaveTasksLocked(result);
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// 调度器专用：单个事务内批量更新多个绑定的 LastRunTime（读→定位→改→保存 全程持锁），
+    /// 只动到期绑定的时间戳，任务列表其它部分（含停用任务）原样保留。
+    /// 定位不到的任务/绑定（已被并发删除）自动跳过；返回实际更新的绑定数。
+    /// </summary>
+    public int UpdateBindingsLastRunTime(
+        IReadOnlyList<(string TaskId, uint InstanceId, DateTime LastRunTime)> updates)
+    {
+        var updated = 0;
+        UpdateTasks(tasks =>
+        {
+            foreach (var (taskId, instanceId, lastRunTime) in updates)
+            {
+                var binding = tasks
+                    .FirstOrDefault(t => t.Id == taskId)?
+                    .Bindings.FirstOrDefault(b => b.InstanceId == instanceId);
+                if (binding == null)
+                {
+                    continue; // 任务或绑定已被并发删除，跳过本次写回
+                }
+
+                binding.LastRunTime = lastRunTime;
+                updated++;
+            }
+
+            return updated > 0 ? tasks : null;
+        });
+
+        return updated;
+    }
+
+    private List<CronTaskDefinition> LoadTasksLocked()
+    {
+        if (!File.Exists(_tasksPath))
+        {
+            return new List<CronTaskDefinition>();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(_tasksPath);
+            return JsonConvert.DeserializeObject<List<CronTaskDefinition>>(json) ?? new List<CronTaskDefinition>();
+        }
+        catch (Exception ex)
+        {
+            MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 读取 cron-tasks.json 失败", ex);
+            return new List<CronTaskDefinition>();
+        }
+    }
+
+    private void SaveTasksLocked(List<CronTaskDefinition> tasks)
+    {
+        Directory.CreateDirectory(_dataPath);
+        var json = JsonConvert.SerializeObject(tasks, Formatting.Indented);
+        AtomicWrite(_tasksPath, json);
     }
 
     public MigrationRecord? LoadMigration()
