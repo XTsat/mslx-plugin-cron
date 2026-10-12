@@ -71,24 +71,30 @@ export interface InstanceItem {
 
 const BASE = '/api/plugins/mslx-plugin-cron/tasks';
 
+// 节点路由：插件任务 API 与实例列表一样强制发往当前选中节点。
+// 宿主 mslx-request 默认按 URL 正则 auto 判定——/api/instance/* 走子节点、/api/plugins/* 走主节点；
+// 不带该参数时页面展示子节点实例，却在主节点创建/执行任务，两侧实例 ID 相同时会操作到错误节点。
+const NODE_REQUEST: Record<string, unknown> = { requestToSlaveNode: true };
+
 export const cronTaskApi = {
-    list: () => request.get<CronTaskDefinition[]>({ url: `${BASE}/list` }),
-    get: (id: string) => request.get<CronTaskDefinition>({ url: `${BASE}/${id}` }),
-    create: (data: CronTaskPayload) => request.post<string>({ url: `${BASE}/create`, data }),
-    update: (id: string, data: CronTaskPayload) => request.post({ url: `${BASE}/update`, data: { id, ...data } }),
-    remove: (id: string) => request.post({ url: `${BASE}/delete/${id}` }),
-    toggle: (id: string) => request.post({ url: `${BASE}/toggle/${id}` }),
-    run: (id: string) => request.post<TaskRunResult[]>({ url: `${BASE}/run/${id}`, timeout: 120 * 1000 }),
-    validateCron: (cron: string) => request.post({ url: `${BASE}/validate-cron`, data: { cron } }),
-    migrate: () => request.post({ url: `${BASE}/migrate` }),
-    migratePreview: () => request.post<MigrationPreview>({ url: `${BASE}/migrate-preview` }),
-    migrateStatus: () => request.get<MigrationStatus>({ url: `${BASE}/migrate-status` }),
+    list: () => request.get<CronTaskDefinition[]>({ url: `${BASE}/list` }, NODE_REQUEST),
+    get: (id: string) => request.get<CronTaskDefinition>({ url: `${BASE}/${id}` }, NODE_REQUEST),
+    create: (data: CronTaskPayload) => request.post<string>({ url: `${BASE}/create`, data }, NODE_REQUEST),
+    update: (id: string, data: CronTaskPayload) => request.post({ url: `${BASE}/update`, data: { id, ...data } }, NODE_REQUEST),
+    remove: (id: string) => request.post({ url: `${BASE}/delete/${id}` }, NODE_REQUEST),
+    toggle: (id: string) => request.post({ url: `${BASE}/toggle/${id}` }, NODE_REQUEST),
+    run: (id: string) => request.post<TaskRunResult[]>({ url: `${BASE}/run/${id}`, timeout: 120 * 1000 }, NODE_REQUEST),
+    validateCron: (cron: string) => request.post({ url: `${BASE}/validate-cron`, data: { cron } }, NODE_REQUEST),
+    migrate: () => request.post({ url: `${BASE}/migrate` }, NODE_REQUEST),
+    migratePreview: () => request.post<MigrationPreview>({ url: `${BASE}/migrate-preview` }, NODE_REQUEST),
+    migrateStatus: () => request.get<MigrationStatus>({ url: `${BASE}/migrate-status` }, NODE_REQUEST),
 };
 
 // ===== 宿主实例 API =====
 
 export const instanceApi = {
-    list: () => request.get<InstanceItem[]>({ url: '/api/instance/list' }),
+    // 显式声明与插件任务 API 一致的节点路由，避免依赖宿主 URL 正则的隐式判定
+    list: () => request.get<InstanceItem[]>({ url: '/api/instance/list' }, NODE_REQUEST),
 };
 
 // ===== 常用 Cron 预设（宿主 cronHelper 的简化版） =====
