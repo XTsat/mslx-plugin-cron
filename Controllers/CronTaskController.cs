@@ -306,6 +306,13 @@ public class CronTaskController : ControllerBase
 
             if (!IsAdmin)
             {
+                // 停用任务翻转为启用会恢复调度执行；shell 任务的启用等同恢复执行系统命令，仅限管理员
+                if (task.Type?.ToLower() == "shell" && !task.Enable)
+                {
+                    forbidMessage = "仅管理员可启用 shell 类型的定时任务";
+                    return null;
+                }
+
                 foreach (var binding in task.Bindings)
                 {
                     if (!HasPermission(binding.InstanceId))
@@ -346,6 +353,12 @@ public class CronTaskController : ControllerBase
 
         if (!IsAdmin)
         {
+            // shell 任务执行的是系统命令，无论是否拥有服务器权限，普通用户一律禁止手动执行
+            if (task.Type?.ToLower() == "shell")
+            {
+                return Forbidden("仅管理员可执行 shell 类型的定时任务");
+            }
+
             foreach (var binding in task.Bindings)
             {
                 if (!HasPermission(binding.InstanceId))
