@@ -207,7 +207,7 @@ REST API 前缀：`api/plugins/mslx-plugin-cron/tasks`
 
 | 位置 | 说明 |
 |------|------|
-| `PluginEntry.cs` | `Version` 属性（`"1.0.0"`，与 CHANGELOG 最新版本一致） |
+| `PluginEntry.cs` | `Version` 属性（与 CHANGELOG 最新版本一致） |
 | `CHANGELOG.md` | 发版时从 `[Unreleased]` 移入 `## vX.Y.Z (YYYY-MM-DD)` |
 | `README.md` | 版本徽章 / 安装版本号（如有） |
 
