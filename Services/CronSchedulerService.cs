@@ -23,6 +23,9 @@ public class CronSchedulerService : IDisposable
     private readonly object _pauseLock = new();
     private int _pauseDepth;
 
+    private readonly object _runningLock = new();
+    private readonly List<(Task Run, CancellationTokenSource Cts)> _running = new();
+
     public CronSchedulerService(
         CronTaskStore store,
         IMCServerService mc)
@@ -74,15 +77,44 @@ public class CronSchedulerService : IDisposable
         try
         {
             _cts?.Cancel();
-            _cts?.Dispose();
         }
         catch (Exception)
         {
             // 忽略停止期异常
         }
 
+        // 等待调度循环真正退出，避免 _loop 在 Dispose 后继续 tick
+        try
+        {
+            _loop?.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception)
+        {
+            // 等待超时/异常不影响卸载流程
+        }
+
+        _cts?.Dispose();
         _cts = null;
         _loop = null;
+
+        // 取消所有进行中的执行任务（重启倒计时、Shell 进程等），防止卸载后仍在后台执行
+        List<CancellationTokenSource> running;
+        lock (_runningLock)
+        {
+            running = _running.Select(r => r.Cts).ToList();
+        }
+
+        foreach (var cts in running)
+        {
+            try
+            {
+                cts.Cancel();
+            }
+            catch (Exception)
+            {
+                // 忽略单任务取消异常
+            }
+        }
     }
 
     public void Dispose()
@@ -162,7 +194,21 @@ public class CronSchedulerService : IDisposable
 
         foreach (var (task, instanceId) in due)
         {
-            _ = Task.Run(() => ExecuteAsync(task, instanceId));
+            // 跟踪执行任务：Stop 时取消，防止卸载后重启倒计时/Shell 仍在后台运行
+            var cts = new CancellationTokenSource();
+            var execTask = Task.Run(() => ExecuteAsync(task, instanceId, cts.Token));
+            lock (_runningLock)
+            {
+                _running.Add((execTask, cts));
+            }
+
+            _ = execTask.ContinueWith(_ =>
+            {
+                lock (_runningLock)
+                {
+                    _running.RemoveAll(r => r.Run == execTask);
+                }
+            }, TaskScheduler.Default);
         }
     }
 
@@ -198,7 +244,10 @@ public class CronSchedulerService : IDisposable
     /// <summary>
     /// 执行一次任务（对单台服务器），返回结果。调度器与「立即执行」共用。
     /// </summary>
-    public async Task<(bool Success, string Message)> ExecuteAsync(CronTaskDefinition task, uint instanceId)
+    public async Task<(bool Success, string Message)> ExecuteAsync(
+        CronTaskDefinition task,
+        uint instanceId,
+        CancellationToken cancellationToken = default)
     {
         MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 执行定时任务 [{task.Name}] ({task.Type}) → 实例 {instanceId}");
 
@@ -219,17 +268,18 @@ public class CronSchedulerService : IDisposable
 
         try
         {
-            var message = await DispatchAsync(task, instanceId);
+            var (success, message) = await DispatchAsync(task, instanceId, cancellationToken);
             MSLX.SDK.MSLX.Events.PublishTaskExecuted(new TaskExecutedEventArgs
             {
                 TaskId = task.Id,
                 TaskName = task.Name,
                 TaskType = task.Type,
                 InstanceId = instanceId,
-                Success = true,
+                Success = success,
+                ErrorMessage = success ? null : message,
                 Timestamp = DateTime.Now
             });
-            return (true, message);
+            return (success, message);
         }
         catch (Exception ex)
         {
@@ -248,37 +298,39 @@ public class CronSchedulerService : IDisposable
         }
     }
 
-    private async Task<string> DispatchAsync(CronTaskDefinition task, uint instanceId)
+    private async Task<(bool Success, string Message)> DispatchAsync(
+        CronTaskDefinition task,
+        uint instanceId,
+        CancellationToken cancellationToken)
     {
         switch (task.Type.ToLower())
         {
             case "command":
                 var ok = _mc.SendCommand(instanceId, task.Payload);
-                if (!ok)
-                {
-                    return $"命令发送失败 (实例 {instanceId} 可能未运行)";
-                }
-
-                return "命令已发送";
+                return ok
+                    ? (true, "命令已发送")
+                    : (false, $"命令发送失败 (实例 {instanceId} 可能未运行)");
 
             case "start":
                 var start = _mc.StartServer(instanceId);
-                return start.success ? "启动指令已下发" : $"启动失败: {start.message}";
+                return start.success
+                    ? (true, "启动指令已下发")
+                    : (false, $"启动失败: {start.message}");
 
             case "stop":
                 var stopped = _mc.StopServer(instanceId);
-                return stopped ? "停止指令已下发" : "停止失败";
+                return stopped ? (true, "停止指令已下发") : (false, "停止失败");
 
             case "restart":
-                await HandleRestartAsync(instanceId, task.Payload);
-                return "重启完成";
+                await HandleRestartAsync(instanceId, task.Payload, cancellationToken);
+                return (true, "重启完成");
 
             case "backup":
                 var backed = _mc.StartBackupServer(instanceId);
-                return backed ? "备份已开始" : "备份启动失败";
+                return backed ? (true, "备份已开始") : (false, "备份启动失败");
 
             case "shell":
-                return await HandleShellAsync(task, instanceId);
+                return await HandleShellAsync(task, instanceId, cancellationToken);
 
             default:
                 throw new Exception($"未知的任务类型: {task.Type}");
@@ -289,7 +341,7 @@ public class CronSchedulerService : IDisposable
     /// 复刻宿主 restart 流程：离线下直接启动；在线下广播倒计时 60s →
     /// 30/10/5s 阶段提示 → tellraw → 停止 → 等待退出(≤30s) → 缓冲2s → 启动。
     /// </summary>
-    private async Task HandleRestartAsync(uint instanceId, string payload)
+    private async Task HandleRestartAsync(uint instanceId, string payload, CancellationToken cancellationToken)
     {
         if (!_mc.IsServerRunning(instanceId))
         {
@@ -318,11 +370,11 @@ public class CronSchedulerService : IDisposable
                 _mc.SendCommand(instanceId, FormatRestartBroadcast(i));
             }
 
-            await Task.Delay(1000);
+            await Task.Delay(1000, cancellationToken);
         }
 
         _mc.SendCommand(instanceId, "tellraw @a [{\"text\":\"[\",\"color\":\"yellow\"},{\"text\":\"MSLX\",\"color\":\"green\"},{\"text\":\"]\",\"color\":\"yellow\"},{\"text\":\"服务器即将重启...\",\"color\":\"aqua\"}]");
-        await Task.Delay(1000); // 确保发包给客户端
+        await Task.Delay(1000, cancellationToken); // 确保发包给客户端
 
         var stopped = _mc.StopServer(instanceId);
         if (!stopped)
@@ -333,11 +385,11 @@ public class CronSchedulerService : IDisposable
         var retry = 0;
         while (_mc.IsServerRunning(instanceId) && retry < 30)
         {
-            await Task.Delay(1000);
+            await Task.Delay(1000, cancellationToken);
             retry++;
         }
 
-        await Task.Delay(2000);
+        await Task.Delay(2000, cancellationToken);
 
         _mc.StartServer(instanceId);
         MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 任务触发的重启已完成: 实例 {instanceId}");
@@ -350,8 +402,12 @@ public class CronSchedulerService : IDisposable
 
     /// <summary>
     /// 复刻宿主 shell 分支：cmd/bash，WorkingDirectory=实例 Base，输出转日志。
+    /// 非零退出码视为执行失败；卸载取消时杀掉仍在运行的进程。
     /// </summary>
-    private async Task<string> HandleShellAsync(CronTaskDefinition task, uint instanceId)
+    private async Task<(bool Success, string Message)> HandleShellAsync(
+        CronTaskDefinition task,
+        uint instanceId,
+        CancellationToken cancellationToken)
     {
         if (!task.RunWhenOffline && !_mc.IsServerRunning(instanceId))
         {
@@ -382,22 +438,42 @@ public class CronSchedulerService : IDisposable
             throw new Exception("进程启动失败");
         }
 
-        var outputTask = process.StandardOutput.ReadToEndAsync();
-        var errorTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-
-        var output = await outputTask;
-        var error = await errorTask;
-        if (!string.IsNullOrWhiteSpace(output))
+        try
         {
-            MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] shell 输出 ({instanceId}): {output}");
-        }
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync(cancellationToken);
 
-        if (!string.IsNullOrWhiteSpace(error))
+            var output = await outputTask;
+            var error = await errorTask;
+            if (!string.IsNullOrWhiteSpace(output))
+            {
+                MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] shell 输出 ({instanceId}): {output}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                MSLX.SDK.MSLX.Logger.Warn($"[mslx-plugin-cron] shell 错误 ({instanceId}): {error}");
+            }
+
+            var ok = process.ExitCode == 0;
+            return ok
+                ? (true, $"已执行于 {serverInfo.Base} (exit {process.ExitCode})")
+                : (false, $"已执行于 {serverInfo.Base}，退出码 {process.ExitCode}（非零视为失败）");
+        }
+        catch (OperationCanceledException)
         {
-            MSLX.SDK.MSLX.Logger.Warn($"[mslx-plugin-cron] shell 错误 ({instanceId}): {error}");
-        }
+            // 卸载/停止时取消：杀掉仍在运行的 shell 进程，防止其继续执行
+            try
+            {
+                process.Kill(true);
+            }
+            catch (Exception)
+            {
+                // 进程可能已自行退出
+            }
 
-        return $"已执行于 {serverInfo.Base} (exit {process.ExitCode})";
+            throw;
+        }
     }
 }
