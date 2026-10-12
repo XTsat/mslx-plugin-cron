@@ -86,6 +86,8 @@ public class MigrationResult
     public bool Skipped { get; set; }
     public string? Reason { get; set; }
     public int MigratedCount { get; set; }
+    /// <summary>本次迁移中禁用宿主任务失败的条数（未登记，下次迁移自动重试）。</summary>
+    public int FailedCount { get; set; }
     public int TaskCount { get; set; }
     public List<MigrationItem> Items { get; set; } = new();
 }

@@ -5,25 +5,30 @@ namespace MSLX.Plugin.Cron.Services;
 
 /// <summary>
 /// 宿主旧任务 → 多服任务 迁移服务。
-/// 归并键：(Type 小写, Cron 去空白, Payload, RunWhenOffline)。
-/// 迁移流程：归并写入插件存储 → 宿主任务逐个禁用（保留原状态）→ 写迁移记录。
+/// 归并键：(Type 小写, Cron 去空白, Payload, RunWhenOffline, 启停状态)。
+/// 迁移流程（迁移期间暂停插件调度，避免双跑）：
+/// 归并写入插件存储（新建任务保留宿主原启停状态）→ 宿主任务逐个禁用，
+/// 检查 UpdateTask 返回值，仅在成功后登记迁移记录（失败/中断可安全重试）→ 写迁移记录。
 /// 卸载时按迁移记录还原宿主任务。
 /// </summary>
 public class CronMigrationService
 {
     private readonly CronTaskStore _store;
+    private readonly CronSchedulerService _scheduler;
 
-    public CronMigrationService(CronTaskStore store)
+    public CronMigrationService(CronTaskStore store, CronSchedulerService scheduler)
     {
         _store = store;
+        _scheduler = scheduler;
     }
 
     /// <summary>
     /// 导入宿主任务（幂等增量，可反复调用）：
     /// - 迁移记录中已导入过的宿主任务 → 跳过；
-    /// - 新任务按 (Type, Cron, Payload, RunWhenOffline) 归并：与已有插件任务同键则把实例并入 Bindings，
-    ///   否则新建插件任务；
+    /// - 新任务按 (Type, Cron, Payload, RunWhenOffline, 启停状态) 归并：与已有插件任务同键
+    ///   且启停状态一致则把实例并入 Bindings，否则新建插件任务（保留宿主原启停状态）；
     /// - 新导入的宿主任务被禁用（保留原状态），卸载时按迁移记录还原。
+    /// 迁移期间暂停插件调度；每条宿主任务仅在禁用成功后登记迁移记录，失败/中断可安全重试。
     /// </summary>
     public MigrationResult Migrate()
     {
@@ -41,79 +46,104 @@ public class CronMigrationService
             return new MigrationResult { Skipped = true, Reason = "没有新的宿主任务需要导入（已全部接管）" };
         }
 
-        var existing = _store.LoadTasks();
-        var byKey = new Dictionary<string, CronTaskDefinition>();
-        foreach (var def in existing)
+        // 迁移期间暂停插件调度：避免插件任务先写入并执行、宿主任务尚未禁用造成双跑
+        _scheduler.Pause();
+        try
         {
-            var key = KeyOf(def.Type, def.Cron, def.Payload, def.RunWhenOffline);
-            if (!byKey.ContainsKey(key))
+            var existing = _store.LoadTasks();
+            var byKey = new Dictionary<string, CronTaskDefinition>();
+            foreach (var def in existing)
             {
-                byKey[key] = def;
-            }
-        }
-
-        var tasks = existing.ToList();
-        var items = new List<MigrationItem>();
-        foreach (var t in fresh)
-        {
-            var key = KeyOf(t.Type, t.Cron, t.Payload, t.RunWhenOffline);
-            if (byKey.TryGetValue(key, out var def))
-            {
-                // 同规则任务：仅把新实例并入绑定，避免重复任务
-                if (def.Bindings.All(b => b.InstanceId != t.InstanceId))
+                var key = MergeKeyOf(def.Type, def.Cron, def.Payload, def.RunWhenOffline, def.Enable);
+                if (!byKey.ContainsKey(key))
                 {
-                    def.Bindings.Add(new TaskBinding { InstanceId = t.InstanceId, LastRunTime = t.LastRunTime });
+                    byKey[key] = def;
                 }
-                items.Add(new MigrationItem { Name = def.Name, InstanceId = t.InstanceId, Merged = true });
             }
-            else
+
+            var tasks = existing.ToList();
+            var items = new List<MigrationItem>();
+            foreach (var t in fresh)
             {
-                def = new CronTaskDefinition
+                var key = MergeKeyOf(t.Type, t.Cron, t.Payload, t.RunWhenOffline, t.Enable);
+                if (byKey.TryGetValue(key, out var def))
                 {
-                    Name = t.Name,
-                    Cron = t.Cron,
-                    Type = t.Type,
-                    Payload = t.Payload,
-                    RunWhenOffline = t.RunWhenOffline,
-                    Enable = true,
-                    Bindings = new List<TaskBinding>
+                    // 同规则且启停状态一致的任务：仅把新实例并入绑定，避免重复任务
+                    if (def.Bindings.All(b => b.InstanceId != t.InstanceId))
                     {
-                        new TaskBinding { InstanceId = t.InstanceId, LastRunTime = t.LastRunTime }
+                        def.Bindings.Add(new TaskBinding { InstanceId = t.InstanceId, LastRunTime = t.LastRunTime });
+                        items.Add(new MigrationItem { Name = def.Name, InstanceId = t.InstanceId, Merged = true });
                     }
-                };
-                tasks.Add(def);
-                byKey[key] = def;
-                items.Add(new MigrationItem { Name = def.Name, InstanceId = t.InstanceId, Merged = false });
+                }
+                else
+                {
+                    // 新建任务保留宿主原启停状态：停用的宿主任务导入后仍为停用
+                    def = new CronTaskDefinition
+                    {
+                        Name = t.Name,
+                        Cron = t.Cron,
+                        Type = t.Type,
+                        Payload = t.Payload,
+                        RunWhenOffline = t.RunWhenOffline,
+                        Enable = t.Enable,
+                        Bindings = new List<TaskBinding>
+                        {
+                            new TaskBinding { InstanceId = t.InstanceId, LastRunTime = t.LastRunTime }
+                        }
+                    };
+                    tasks.Add(def);
+                    byKey[key] = def;
+                    items.Add(new MigrationItem { Name = def.Name, InstanceId = t.InstanceId, Merged = false });
+                }
             }
-        }
 
-        _store.SaveTasks(tasks);
+            _store.SaveTasks(tasks);
 
-        record ??= new MigrationRecord { MigratedAt = DateTime.Now };
-        foreach (var t in fresh)
-        {
-            record.HostTasks.Add(new HostTaskRecord
+            record ??= new MigrationRecord { MigratedAt = DateTime.Now };
+            var failedCount = 0;
+            foreach (var t in fresh)
             {
-                TaskId = t.ID,
-                InstanceId = t.InstanceId,
-                OriginalEnable = t.Enable
-            });
+                var originalEnable = t.Enable; // 先取原状态再禁用宿主任务
+                t.Enable = false;
+                if (!MSLX.SDK.MSLX.Config.Tasks.UpdateTask(t))
+                {
+                    failedCount++;
+                    MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 禁用宿主任务 {t.ID} 失败，未登记该任务；下次迁移将重试");
+                    continue;
+                }
 
-            t.Enable = false;
-            MSLX.SDK.MSLX.Config.Tasks.UpdateTask(t);
+                // 仅登记成功禁用的宿主任务：记录始终等于「已接管」集合，中断后不会半完成态重复导入
+                record.HostTasks.Add(new HostTaskRecord
+                {
+                    TaskId = t.ID,
+                    InstanceId = t.InstanceId,
+                    OriginalEnable = originalEnable
+                });
+                _store.SaveMigration(record);
+            }
+
+            return new MigrationResult
+            {
+                MigratedCount = fresh.Count - failedCount,
+                FailedCount = failedCount,
+                TaskCount = tasks.Count,
+                Items = items
+            };
         }
-        _store.SaveMigration(record);
-
-        return new MigrationResult
+        finally
         {
-            MigratedCount = fresh.Count,
-            TaskCount = tasks.Count
-        };
+            _scheduler.Resume();
+        }
     }
 
     private static string KeyOf(string type, string cron, string? payload, bool runWhenOffline)
     {
         return $"{type.ToLower().Trim()}|{cron.Trim()}|{payload ?? ""}|{(runWhenOffline ? 1 : 0)}";
+    }
+
+    private static string MergeKeyOf(string type, string cron, string? payload, bool runWhenOffline, bool enable)
+    {
+        return $"{KeyOf(type, cron, payload, runWhenOffline)}|{(enable ? 1 : 0)}";
     }
 
     /// <summary>
@@ -139,7 +169,7 @@ public class CronMigrationService
         var byKey = new Dictionary<string, CronTaskDefinition>();
         foreach (var def in _store.LoadTasks())
         {
-            var key = KeyOf(def.Type, def.Cron, def.Payload, def.RunWhenOffline);
+            var key = MergeKeyOf(def.Type, def.Cron, def.Payload, def.RunWhenOffline, def.Enable);
             if (!byKey.ContainsKey(key))
             {
                 byKey[key] = def;
@@ -149,7 +179,7 @@ public class CronMigrationService
         var items = new List<MigrationPreviewItem>();
         foreach (var t in fresh)
         {
-            var key = KeyOf(t.Type, t.Cron, t.Payload, t.RunWhenOffline);
+            var key = MergeKeyOf(t.Type, t.Cron, t.Payload, t.RunWhenOffline, t.Enable);
             if (byKey.TryGetValue(key, out var def))
             {
                 items.Add(new MigrationPreviewItem

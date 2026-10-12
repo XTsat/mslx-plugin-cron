@@ -20,12 +20,39 @@ public class CronSchedulerService : IDisposable
     private CancellationTokenSource? _cts;
     private Task? _loop;
 
+    private readonly object _pauseLock = new();
+    private int _pauseDepth;
+
     public CronSchedulerService(
         CronTaskStore store,
         IMCServerService mc)
     {
         _store = store;
         _mc = mc;
+    }
+
+    /// <summary>
+    /// 暂停调度（可重入）：迁移等需要短暂停摆的场景调用，防止插件侧提前执行造成双跑。
+    /// 必须与 <see cref="Resume"/> 成对调用。
+    /// </summary>
+    public void Pause()
+    {
+        lock (_pauseLock)
+        {
+            _pauseDepth++;
+        }
+    }
+
+    /// <summary>恢复调度，与 <see cref="Pause"/> 成对调用。</summary>
+    public void Resume()
+    {
+        lock (_pauseLock)
+        {
+            if (_pauseDepth > 0)
+            {
+                _pauseDepth--;
+            }
+        }
     }
 
     /// <summary>调度器是否运行中</summary>
@@ -90,6 +117,17 @@ public class CronSchedulerService : IDisposable
 
     private async Task ProcessAsync()
     {
+        bool paused;
+        lock (_pauseLock)
+        {
+            paused = _pauseDepth > 0;
+        }
+
+        if (paused)
+        {
+            return; // 迁移等操作暂停调度：本期 tick 不执行任何任务
+        }
+
         var nowUtc = DateTime.UtcNow;
         // 加载完整列表（含停用任务）：只对启用任务调度，但写回时不能把停用任务覆盖丢失
         var tasks = _store.LoadTasks();

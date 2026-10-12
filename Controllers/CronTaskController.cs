@@ -420,10 +420,15 @@ public class CronTaskController : ControllerBase
         try
         {
             var result = _migration.Migrate();
+            var message = result.Skipped
+                ? result.Reason ?? "无需迁移"
+                : result.FailedCount > 0
+                    ? $"迁移完成，但有 {result.FailedCount} 条宿主任务禁用失败（未登记，可再次执行迁移重试）"
+                    : "迁移完成";
             return Ok(new ApiResponse<MigrationResult>
             {
                 Code = 200,
-                Message = result.Skipped ? result.Reason ?? "无需迁移" : "迁移完成",
+                Message = message,
                 Data = result
             });
         }
