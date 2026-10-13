@@ -26,6 +26,10 @@ public class CronSchedulerService : IDisposable
     private readonly object _runningLock = new();
     private readonly List<(Task Run, CancellationTokenSource Cts)> _running = new();
 
+    // 停止标记：Stop() 置位后拒绝新登记的执行任务（与 _runningLock 同锁读写），
+    // 消除「快照后登记 → 既不取消也不等待」的竞态
+    private bool _stopping;
+
     // 服务器删除后的绑定跟随清理：周期巡检而非每 tick 执行，避免无谓的清单比对与落盘
     private static readonly TimeSpan ServerCleanupInterval = TimeSpan.FromSeconds(60);
     private DateTime _lastServerCleanupUtc = DateTime.MinValue;
@@ -73,12 +77,24 @@ public class CronSchedulerService : IDisposable
             return;
         }
 
+        lock (_runningLock)
+        {
+            _stopping = false; // 停止后重启（插件热更新）时清除停止标记，恢复新任务的登记
+        }
+
         _cts = new CancellationTokenSource();
         _loop = Task.Run(() => LoopAsync(_cts.Token));
     }
 
     public void Stop()
     {
+        // 先置停止标记：此后登记的执行任务（含手动立即执行）一律拒绝，
+        // 消除「快照 _running 之后才登记的任务既不被取消也不被等待」的竞态
+        lock (_runningLock)
+        {
+            _stopping = true;
+        }
+
         try
         {
             _cts?.Cancel();
@@ -102,39 +118,50 @@ public class CronSchedulerService : IDisposable
         _cts = null;
         _loop = null;
 
-        // 取消所有进行中的执行任务（重启倒计时、Shell 进程等），防止卸载后仍在后台执行
-        List<CancellationTokenSource> running;
-        lock (_runningLock)
+        // 取消并等待执行任务：循环复查 _running 至空（上限 5s），
+        // 覆盖取消期间新登记的任务（ProcessAsync 已通过 _stopping 拒绝新登记，此处兜底复查）
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
         {
-            running = _running.Select(r => r.Cts).ToList();
-        }
+            Task[] runningTasks;
+            CancellationTokenSource[] runningCts;
+            lock (_runningLock)
+            {
+                runningTasks = _running.Select(r => r.Run).ToArray();
+                runningCts = _running.Select(r => r.Cts).ToArray();
+            }
 
-        foreach (var cts in running)
-        {
+            if (runningTasks.Length == 0)
+            {
+                return;
+            }
+
+            foreach (var cts in runningCts)
+            {
+                try
+                {
+                    cts.Cancel();
+                }
+                catch (Exception)
+                {
+                    // 忽略单任务取消异常
+                }
+            }
+
             try
             {
-                cts.Cancel();
+                var remaining = deadline - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return; // 已超时：剩余任务交由进程销毁，避免 WaitAll 负超时抛异常
+                }
+
+                Task.WaitAll(runningTasks, remaining);
             }
             catch (Exception)
             {
-                // 忽略单任务取消异常
+                // 等待超时/任务异常不影响卸载流程
             }
-        }
-
-        // 等待运行中的手动/定时任务退出（取消后 Shell 进程被杀、重启流程中断），防止卸载后仍在后台执行
-        Task[] runningTasks;
-        lock (_runningLock)
-        {
-            runningTasks = _running.Select(r => r.Run).ToArray();
-        }
-
-        try
-        {
-            Task.WaitAll(runningTasks, TimeSpan.FromSeconds(5));
-        }
-        catch (Exception)
-        {
-            // 等待超时/任务异常不影响卸载流程
         }
     }
 
@@ -217,11 +244,19 @@ public class CronSchedulerService : IDisposable
 
         foreach (var (task, instanceId) in due)
         {
-            // 跟踪执行任务：Stop 时取消，防止卸载后重启倒计时/Shell 仍在后台运行
-            var cts = new CancellationTokenSource();
-            var execTask = Task.Run(() => ExecuteAsync(task, instanceId, cts.Token));
+            // 登记与 _stopping 检查在同一把锁内：停止中的新任务直接跳过，不再启动
+            Task execTask;
+            CancellationTokenSource cts;
             lock (_runningLock)
             {
+                if (_stopping)
+                {
+                    continue;
+                }
+
+                // 跟踪执行任务：Stop 时取消，防止卸载后重启倒计时/Shell 仍在后台运行
+                cts = new CancellationTokenSource();
+                execTask = Task.Run(() => ExecuteAsync(task, instanceId, cts.Token));
                 _running.Add((execTask, cts));
             }
 
@@ -363,10 +398,18 @@ public class CronSchedulerService : IDisposable
         CronTaskDefinition task,
         uint instanceId)
     {
-        var cts = new CancellationTokenSource();
-        var execTask = Task.Run(() => ExecuteAsync(task, instanceId, cts.Token));
+        Task<(bool Success, string Message)> execTask;
+        CancellationTokenSource cts;
         lock (_runningLock)
         {
+            // 停止中直接拒绝：与 _stopping 检查同锁，登记后 Stop() 一定能取消并等待
+            if (_stopping)
+            {
+                return (false, "调度器已停止，无法立即执行");
+            }
+
+            cts = new CancellationTokenSource();
+            execTask = Task.Run(() => ExecuteAsync(task, instanceId, cts.Token));
             _running.Add((execTask, cts));
         }
 

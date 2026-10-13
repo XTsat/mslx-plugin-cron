@@ -214,6 +214,14 @@ public class CronMigrationService
     /// </summary>
     public MigrationPreview Preview()
     {
+        lock (_migrateLock)
+        {
+            return PreviewCore();
+        }
+    }
+
+    private MigrationPreview PreviewCore()
+    {
         var record = _store.LoadMigration();
         var hostTasks = MSLX.SDK.MSLX.Config.Tasks.GetTaskList().ToList();
         if (hostTasks.Count == 0)
@@ -221,8 +229,11 @@ public class CronMigrationService
             return new MigrationPreview { Skipped = true, Reason = "宿主没有定时任务可导入" };
         }
 
-        var importedIds = record?.HostTasks.Select(r => r.TaskId).ToHashSet() ?? new HashSet<string>();
-        var fresh = hostTasks.Where(t => !importedIds.Contains(t.ID)).ToList();
+        // 仅已接管(done)的宿主任务视为已导入；pending（上次中断遗留）仍出现在预览中，供用户重新执行迁移完成接管
+        var doneIds = record?.HostTasks
+            .Where(r => r.Status == HostTaskRecord.StatusDone)
+            .Select(r => r.TaskId).ToHashSet() ?? new HashSet<string>();
+        var fresh = hostTasks.Where(t => !doneIds.Contains(t.ID)).ToList();
         if (fresh.Count == 0)
         {
             return new MigrationPreview { Skipped = true, Reason = "没有新的宿主任务需要导入（已全部接管）" };
@@ -241,7 +252,11 @@ public class CronMigrationService
         var items = new List<MigrationPreviewItem>();
         foreach (var t in fresh)
         {
-            var key = MergeKeyOf(t.Type, t.Cron, t.Payload, t.RunWhenOffline, t.Enable);
+            // pending 任务取记录中的原启停状态做归并键，与 Migrate 阶段③ 的键保持一致；
+            // 宿主任务可能尚未禁用（崩溃在接管中途），不能再读宿主当前状态
+            var originalEnable = record?.HostTasks
+                .FirstOrDefault(r => r.TaskId == t.ID)?.OriginalEnable ?? t.Enable;
+            var key = MergeKeyOf(t.Type, t.Cron, t.Payload, t.RunWhenOffline, originalEnable);
             if (byKey.TryGetValue(key, out var def))
             {
                 items.Add(new MigrationPreviewItem
@@ -281,32 +296,36 @@ public class CronMigrationService
     /// </summary>
     public void Restore()
     {
-        var record = _store.LoadMigration();
-        if (record == null)
+        // 与 Migrate 共用 _migrateLock：还原与迁移并发时不会交错修改宿主任务启停状态，避免短暂双跑
+        lock (_migrateLock)
         {
-            return;
-        }
-
-        foreach (var r in record.HostTasks)
-        {
-            try
+            var record = _store.LoadMigration();
+            if (record == null)
             {
-                var task = MSLX.SDK.MSLX.Config.Tasks.GetTask(r.TaskId);
-                if (task != null)
+                return;
+            }
+
+            foreach (var r in record.HostTasks)
+            {
+                try
                 {
-                    task.Enable = r.OriginalEnable;
-                    MSLX.SDK.MSLX.Config.Tasks.UpdateTask(task);
+                    var task = MSLX.SDK.MSLX.Config.Tasks.GetTask(r.TaskId);
+                    if (task != null)
+                    {
+                        task.Enable = r.OriginalEnable;
+                        MSLX.SDK.MSLX.Config.Tasks.UpdateTask(task);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 还原宿主任务 {r.TaskId} 失败", ex);
                 }
             }
-            catch (Exception ex)
-            {
-                MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 还原宿主任务 {r.TaskId} 失败", ex);
-            }
-        }
 
-        // 保留迁移记录：即使宿主进程重启触发插件卸载，已导入判重状态也不丢失，
-        // 避免已导入任务再次出现在「导入宿主任务」预览中。
-        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 已还原 {record.HostTasks.Count} 条宿主任务（保留迁移记录）");
+            // 保留迁移记录：即使宿主进程重启触发插件卸载，已导入判重状态也不丢失，
+            // 避免已导入任务再次出现在「导入宿主任务」预览中。
+            MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 已还原 {record.HostTasks.Count} 条宿主任务（保留迁移记录）");
+        }
     }
 
     /// <summary>
@@ -317,6 +336,12 @@ public class CronMigrationService
         var record = _store.LoadMigration();
         if (record != null)
         {
+            // 存在待接管(pending)条目时迁移未完成：前端需继续提示迁移，而不是误报已迁移
+            if (record.HostTasks.Any(r => r.Status == HostTaskRecord.StatusPending))
+            {
+                return (false, "迁移尚未完成，有待接管任务", _store.LoadTasks().Count, record.MigratedAt);
+            }
+
             return (true, null, _store.LoadTasks().Count, record.MigratedAt);
         }
 
