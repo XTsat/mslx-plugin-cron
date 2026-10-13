@@ -115,6 +115,22 @@ public class CronSchedulerService : IDisposable
                 // 忽略单任务取消异常
             }
         }
+
+        // 等待运行中的手动/定时任务退出（取消后 Shell 进程被杀、重启流程中断），防止卸载后仍在后台执行
+        Task[] runningTasks;
+        lock (_runningLock)
+        {
+            runningTasks = _running.Select(r => r.Run).ToArray();
+        }
+
+        try
+        {
+            Task.WaitAll(runningTasks, TimeSpan.FromSeconds(5));
+        }
+        catch (Exception)
+        {
+            // 等待超时/任务异常不影响卸载流程
+        }
     }
 
     public void Dispose()
@@ -298,6 +314,36 @@ public class CronSchedulerService : IDisposable
         }
     }
 
+    /// <summary>
+    /// 「立即执行」：与定时任务共用 <see cref="ExecuteAsync"/> 执行路径，并登记到 _running，
+    /// 使 Stop()/卸载能够取消并等待手动执行的任务退出。
+    /// </summary>
+    public async Task<(bool Success, string Message)> RunNowAsync(
+        CronTaskDefinition task,
+        uint instanceId)
+    {
+        var cts = new CancellationTokenSource();
+        var execTask = Task.Run(() => ExecuteAsync(task, instanceId, cts.Token));
+        lock (_runningLock)
+        {
+            _running.Add((execTask, cts));
+        }
+
+        try
+        {
+            return await execTask;
+        }
+        finally
+        {
+            lock (_runningLock)
+            {
+                _running.RemoveAll(r => r.Run == execTask);
+            }
+
+            cts.Dispose();
+        }
+    }
+
     private async Task<(bool Success, string Message)> DispatchAsync(
         CronTaskDefinition task,
         uint instanceId,
@@ -345,7 +391,12 @@ public class CronSchedulerService : IDisposable
     {
         if (!_mc.IsServerRunning(instanceId))
         {
-            _mc.StartServer(instanceId);
+            var offlineStart = _mc.StartServer(instanceId);
+            if (!offlineStart.success)
+            {
+                throw new Exception($"启动失败: {offlineStart.message}");
+            }
+
             MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 任务重启: 实例 {instanceId} 离线，直接启动");
             return;
         }
@@ -391,7 +442,12 @@ public class CronSchedulerService : IDisposable
 
         await Task.Delay(2000, cancellationToken);
 
-        _mc.StartServer(instanceId);
+        var start = _mc.StartServer(instanceId);
+        if (!start.success)
+        {
+            throw new Exception($"启动失败: {start.message}");
+        }
+
         MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 任务触发的重启已完成: 实例 {instanceId}");
     }
 

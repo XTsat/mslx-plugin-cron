@@ -6,15 +6,17 @@ namespace MSLX.Plugin.Cron.Services;
 /// <summary>
 /// 宿主旧任务 → 多服任务 迁移服务。
 /// 归并键：(Type 小写, Cron 去空白, Payload, RunWhenOffline, 启停状态)。
-/// 迁移流程（迁移期间暂停插件调度，避免双跑）：
-/// 归并写入插件存储（新建任务保留宿主原启停状态）→ 宿主任务逐个禁用，
-/// 检查 UpdateTask 返回值，仅在成功后登记迁移记录（失败/中断可安全重试）→ 写迁移记录。
+/// 接管流程（迁移期间暂停插件调度，避免双跑）：
+/// 先持久化「原启停状态 + 待接管进度」→ 宿主任务逐个禁用（成功才标记 done）→
+/// 仅对 done 的宿主任务做插件归并（事务内读改写）→ 归并落盘后标记 PluginTasksMerged。
+/// 任何中间态失败都不会让宿主与插件同时执行；中断后重试按迁移记录恢复。
 /// 卸载时按迁移记录还原宿主任务。
 /// </summary>
 public class CronMigrationService
 {
     private readonly CronTaskStore _store;
     private readonly CronSchedulerService _scheduler;
+    private readonly object _migrateLock = new();
 
     public CronMigrationService(CronTaskStore store, CronSchedulerService scheduler)
     {
@@ -24,115 +26,175 @@ public class CronMigrationService
 
     /// <summary>
     /// 导入宿主任务（幂等增量，可反复调用）：
-    /// - 迁移记录中已导入过的宿主任务 → 跳过；
-    /// - 新任务按 (Type, Cron, Payload, RunWhenOffline, 启停状态) 归并：与已有插件任务同键
+    /// - 迁移记录中已接管(done)的宿主任务 → 跳过；pending 的按宿主任务 ID 恢复重试；
+    /// - 新任务按 (Type, Cron, Payload, RunWhenOffline, 原启停状态) 归并：与已有插件任务同键
     ///   且启停状态一致则把实例并入 Bindings，否则新建插件任务（保留宿主原启停状态）；
-    /// - 新导入的宿主任务被禁用（保留原状态），卸载时按迁移记录还原。
-    /// 迁移期间暂停插件调度；每条宿主任务仅在禁用成功后登记迁移记录，失败/中断可安全重试。
+    /// - 接管顺序：先持久化原状态与进度，再禁用宿主任务，最后归并插件任务——
+    ///   禁用失败的任务保持 pending、不归并，不会出现宿主与插件同时执行；
+    ///   记录写入失败时因原状态已提前落盘，重试按 ID 恢复，不会重复导入或丢失原启用状态。
+    /// 迁移期间暂停插件调度；迁移请求串行化执行。
     /// </summary>
     public MigrationResult Migrate()
     {
-        var record = _store.LoadMigration();
-        var hostTasks = MSLX.SDK.MSLX.Config.Tasks.GetTaskList().ToList();
-        if (hostTasks.Count == 0)
+        // 串行化迁移请求：并发点击不会交错处理同一批宿主任务
+        lock (_migrateLock)
         {
-            return new MigrationResult { Skipped = true, Reason = "宿主没有定时任务可导入" };
-        }
-
-        var importedIds = record?.HostTasks.Select(r => r.TaskId).ToHashSet() ?? new HashSet<string>();
-        var fresh = hostTasks.Where(t => !importedIds.Contains(t.ID)).ToList();
-        if (fresh.Count == 0)
-        {
-            return new MigrationResult { Skipped = true, Reason = "没有新的宿主任务需要导入（已全部接管）" };
-        }
-
-        // 迁移期间暂停插件调度：避免插件任务先写入并执行、宿主任务尚未禁用造成双跑
-        _scheduler.Pause();
-        try
-        {
-            var existing = _store.LoadTasks();
-            var byKey = new Dictionary<string, CronTaskDefinition>();
-            foreach (var def in existing)
+            var record = _store.LoadMigration() ?? new MigrationRecord { MigratedAt = DateTime.Now };
+            var hostTasks = MSLX.SDK.MSLX.Config.Tasks.GetTaskList().ToList();
+            if (hostTasks.Count == 0)
             {
-                var key = MergeKeyOf(def.Type, def.Cron, def.Payload, def.RunWhenOffline, def.Enable);
-                if (!byKey.ContainsKey(key))
-                {
-                    byKey[key] = def;
-                }
+                return new MigrationResult { Skipped = true, Reason = "宿主没有定时任务可导入" };
             }
 
-            var tasks = existing.ToList();
-            var items = new List<MigrationItem>();
-            foreach (var t in fresh)
+            var doneIds = record.HostTasks
+                .Where(r => r.Status == HostTaskRecord.StatusDone)
+                .Select(r => r.TaskId).ToHashSet();
+            var pendingBefore = record.HostTasks
+                .Where(r => r.Status == HostTaskRecord.StatusPending).Count();
+            // 全新任务 = 迁移记录中完全不存在的宿主任务；pending 的按 ID 恢复，不再当作新任务重复导入
+            var fresh = hostTasks.Where(t =>
+                !doneIds.Contains(t.ID) &&
+                record.HostTasks.All(r => r.TaskId != t.ID)).ToList();
+            if (fresh.Count == 0 && pendingBefore == 0 && record.PluginTasksMerged)
             {
-                var key = MergeKeyOf(t.Type, t.Cron, t.Payload, t.RunWhenOffline, t.Enable);
-                if (byKey.TryGetValue(key, out var def))
-                {
-                    // 同规则且启停状态一致的任务：仅把新实例并入绑定，避免重复任务
-                    if (def.Bindings.All(b => b.InstanceId != t.InstanceId))
-                    {
-                        def.Bindings.Add(new TaskBinding { InstanceId = t.InstanceId, LastRunTime = t.LastRunTime });
-                        items.Add(new MigrationItem { Name = def.Name, InstanceId = t.InstanceId, Merged = true });
-                    }
-                }
-                else
-                {
-                    // 新建任务保留宿主原启停状态：停用的宿主任务导入后仍为停用
-                    def = new CronTaskDefinition
-                    {
-                        Name = t.Name,
-                        Cron = t.Cron,
-                        Type = t.Type,
-                        Payload = t.Payload,
-                        RunWhenOffline = t.RunWhenOffline,
-                        Enable = t.Enable,
-                        Bindings = new List<TaskBinding>
-                        {
-                            new TaskBinding { InstanceId = t.InstanceId, LastRunTime = t.LastRunTime }
-                        }
-                    };
-                    tasks.Add(def);
-                    byKey[key] = def;
-                    items.Add(new MigrationItem { Name = def.Name, InstanceId = t.InstanceId, Merged = false });
-                }
+                return new MigrationResult { Skipped = true, Reason = "没有新的宿主任务需要导入（已全部接管）" };
             }
 
-            _store.SaveTasks(tasks);
-
-            record ??= new MigrationRecord { MigratedAt = DateTime.Now };
-            var failedCount = 0;
-            foreach (var t in fresh)
+            // 迁移期间暂停插件调度：避免插件任务先执行、宿主任务尚未禁用造成双跑
+            _scheduler.Pause();
+            try
             {
-                var originalEnable = t.Enable; // 先取原状态再禁用宿主任务
-                t.Enable = false;
-                if (!MSLX.SDK.MSLX.Config.Tasks.UpdateTask(t))
+                // ① 修改宿主之前先持久化原状态与迁移进度；此步失败会在改动任何宿主任务前抛出，可安全重试
+                foreach (var t in fresh)
                 {
-                    failedCount++;
-                    MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 禁用宿主任务 {t.ID} 失败，未登记该任务；下次迁移将重试");
-                    continue;
+                    record.HostTasks.Add(new HostTaskRecord
+                    {
+                        TaskId = t.ID,
+                        InstanceId = t.InstanceId,
+                        OriginalEnable = t.Enable,
+                        Status = HostTaskRecord.StatusPending
+                    });
                 }
-
-                // 仅登记成功禁用的宿主任务：记录始终等于「已接管」集合，中断后不会半完成态重复导入
-                record.HostTasks.Add(new HostTaskRecord
-                {
-                    TaskId = t.ID,
-                    InstanceId = t.InstanceId,
-                    OriginalEnable = originalEnable
-                });
                 _store.SaveMigration(record);
-            }
 
-            return new MigrationResult
+                // ② 逐个接管：禁用成功才标记 done 并持久化进度；失败/异常保持 pending（不归并），下次按 ID 重试
+                var failedCount = 0;
+                var migrated = 0;
+                foreach (var entry in record.HostTasks
+                             .Where(r => r.Status == HostTaskRecord.StatusPending).ToList())
+                {
+                    var hostTask = hostTasks.FirstOrDefault(t => t.ID == entry.TaskId);
+                    if (hostTask == null)
+                    {
+                        // 宿主任务已被并发删除：无可接管也无须还原，标记完成避免反复重试
+                        entry.Status = HostTaskRecord.StatusDone;
+                        _store.SaveMigration(record);
+                        continue;
+                    }
+
+                    if (hostTask.Enable)
+                    {
+                        try
+                        {
+                            hostTask.Enable = false;
+                            if (!MSLX.SDK.MSLX.Config.Tasks.UpdateTask(hostTask))
+                            {
+                                failedCount++;
+                                MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 禁用宿主任务 {hostTask.ID} 失败，保持待接管状态；下次迁移将重试");
+                                continue;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            failedCount++;
+                            MSLX.SDK.MSLX.Logger.Error($"[mslx-plugin-cron] 禁用宿主任务 {hostTask.ID} 失败，保持待接管状态；下次迁移将重试", ex);
+                            continue;
+                        }
+                    }
+
+                    // 禁用成功（或上次已禁用）才登记 done；此处记录写失败由调用方提示重试，重试时再禁用是幂等的
+                    entry.Status = HostTaskRecord.StatusDone;
+                    _store.SaveMigration(record);
+                    migrated++;
+                }
+
+                // ③ 仅归并已接管(done)的宿主任务；事务内读改写，防止旧快照覆盖并发创建/修改/删除的任务
+                var items = new List<MigrationItem>();
+                var mergedTasks = _store.UpdateTasks(tasks =>
+                {
+                    var byKey = new Dictionary<string, CronTaskDefinition>();
+                    foreach (var def in tasks)
+                    {
+                        var key = MergeKeyOf(def.Type, def.Cron, def.Payload, def.RunWhenOffline, def.Enable);
+                        if (!byKey.ContainsKey(key))
+                        {
+                            byKey[key] = def;
+                        }
+                    }
+
+                    var changed = false;
+                    foreach (var entry in record.HostTasks.Where(r => r.Status == HostTaskRecord.StatusDone))
+                    {
+                        var hostTask = hostTasks.FirstOrDefault(t => t.ID == entry.TaskId);
+                        if (hostTask == null)
+                        {
+                            continue; // 宿主任务已不存在，不重建
+                        }
+
+                        // 归并键使用已持久化的原启停状态：此时宿主任务已被禁用，不能再读宿主当前状态
+                        var key = MergeKeyOf(hostTask.Type, hostTask.Cron, hostTask.Payload, hostTask.RunWhenOffline, entry.OriginalEnable);
+                        if (byKey.TryGetValue(key, out var def))
+                        {
+                            // 同规则且启停状态一致的任务：仅把新实例并入绑定，避免重复任务
+                            if (def.Bindings.All(b => b.InstanceId != hostTask.InstanceId))
+                            {
+                                def.Bindings.Add(new TaskBinding { InstanceId = hostTask.InstanceId, LastRunTime = hostTask.LastRunTime });
+                                items.Add(new MigrationItem { Name = def.Name, InstanceId = hostTask.InstanceId, Merged = true });
+                                changed = true;
+                            }
+                        }
+                        else
+                        {
+                            // 新建任务保留宿主原启停状态：停用的宿主任务导入后仍为停用
+                            def = new CronTaskDefinition
+                            {
+                                Name = hostTask.Name,
+                                Cron = hostTask.Cron,
+                                Type = hostTask.Type,
+                                Payload = hostTask.Payload,
+                                RunWhenOffline = hostTask.RunWhenOffline,
+                                Enable = entry.OriginalEnable,
+                                Bindings = new List<TaskBinding>
+                                {
+                                    new TaskBinding { InstanceId = hostTask.InstanceId, LastRunTime = hostTask.LastRunTime }
+                                }
+                            };
+                            tasks.Add(def);
+                            byKey[key] = def;
+                            items.Add(new MigrationItem { Name = def.Name, InstanceId = hostTask.InstanceId, Merged = false });
+                            changed = true;
+                        }
+                    }
+
+                    return changed ? tasks : null; // 无实际变化不落盘
+                });
+
+                // ④ 归并落盘（或确认无需变更）后标记完成，中断后重试不再误判、也不丢失已禁用未保存的进度
+                record.PluginTasksMerged = true;
+                _store.SaveMigration(record);
+
+                return new MigrationResult
+                {
+                    MigratedCount = migrated,
+                    FailedCount = failedCount,
+                    TaskCount = mergedTasks?.Count ?? _store.LoadTasks().Count,
+                    Items = items
+                };
+            }
+            finally
             {
-                MigratedCount = fresh.Count - failedCount,
-                FailedCount = failedCount,
-                TaskCount = tasks.Count,
-                Items = items
-            };
-        }
-        finally
-        {
-            _scheduler.Resume();
+                _scheduler.Resume();
+            }
         }
     }
 

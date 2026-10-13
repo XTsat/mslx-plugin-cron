@@ -371,7 +371,8 @@ public class CronTaskController : ControllerBase
         var results = new List<TaskRunResult>();
         foreach (var binding in task.Bindings)
         {
-            var (success, message) = await _scheduler.ExecuteAsync(task, binding.InstanceId);
+            // 与定时任务共用执行路径并登记到调度器 _running：卸载时可取消并等待手动执行退出
+            var (success, message) = await _scheduler.RunNowAsync(task, binding.InstanceId);
             results.Add(new TaskRunResult
             {
                 InstanceId = binding.InstanceId,
@@ -423,7 +424,7 @@ public class CronTaskController : ControllerBase
             var message = result.Skipped
                 ? result.Reason ?? "无需迁移"
                 : result.FailedCount > 0
-                    ? $"迁移完成，但有 {result.FailedCount} 条宿主任务禁用失败（未登记，可再次执行迁移重试）"
+                    ? $"迁移完成，但有 {result.FailedCount} 条宿主任务禁用失败（保持待接管状态，可再次执行迁移重试）"
                     : "迁移完成";
             return Ok(new ApiResponse<MigrationResult>
             {

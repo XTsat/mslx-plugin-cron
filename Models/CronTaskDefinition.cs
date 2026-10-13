@@ -66,19 +66,32 @@ public class CronTaskUpdateRequest : CronTaskRequest
 }
 
 /// <summary>
-/// 迁移记录：宿主哪些任务被禁用、原状态如何，用于卸载时还原。
+/// 迁移记录：宿主哪些任务被禁用、原状态如何，用于卸载时还原与中断重试。
 /// </summary>
 public class MigrationRecord
 {
     [JsonProperty("migratedAt")] public DateTime MigratedAt { get; set; } = DateTime.Now;
     [JsonProperty("hostTasks")] public List<HostTaskRecord> HostTasks { get; set; } = new();
+
+    /// <summary>
+    /// 插件任务归并是否已落盘。宿主任务全部禁用成功后才置 true；
+    /// 用于区分「宿主已禁用、插件未保存」的半完成态，中断后重试据此恢复归并而不是误判为全部完成。
+    /// </summary>
+    [JsonProperty("pluginTasksMerged")] public bool PluginTasksMerged { get; set; }
 }
 
 public class HostTaskRecord
 {
+    public const string StatusPending = "pending";
+    public const string StatusDone = "done";
+
     [JsonProperty("taskId")] public string TaskId { get; set; } = "";
     [JsonProperty("instanceId")] public uint InstanceId { get; set; }
     [JsonProperty("originalEnable")] public bool OriginalEnable { get; set; }
+    /// <summary>
+    /// 接管进度：pending = 原状态已持久化、宿主任务尚未确认禁用成功；done = 宿主任务已禁用、插件侧已接管。
+    /// </summary>
+    [JsonProperty("status")] public string Status { get; set; } = StatusPending;
 }
 
 public class MigrationResult
@@ -86,7 +99,7 @@ public class MigrationResult
     public bool Skipped { get; set; }
     public string? Reason { get; set; }
     public int MigratedCount { get; set; }
-    /// <summary>本次迁移中禁用宿主任务失败的条数（未登记，下次迁移自动重试）。</summary>
+    /// <summary>本次迁移中禁用宿主任务失败的条数（保持待接管状态，下次迁移自动重试）。</summary>
     public int FailedCount { get; set; }
     public int TaskCount { get; set; }
     public List<MigrationItem> Items { get; set; } = new();
