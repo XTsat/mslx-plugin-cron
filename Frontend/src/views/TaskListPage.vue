@@ -139,9 +139,28 @@
                                 <span class="text-xs text-[var(--td-text-color-secondary)] ml-1.5">#{{ inst.id }}</span>
                             </t-checkbox>
                         </div>
+                        <!-- 绑定中但已被删除的服务器：勾选组里没有对应选项，单独渲染才能取消勾选/移除 -->
+                        <div
+                            v-for="sid in staleBindingIds"
+                            :key="'stale-' + sid"
+                            class="flex items-center gap-3 p-3 rounded-xl border border-dashed border-[var(--td-error-color)]/50 bg-red-50/60 dark:bg-red-900/10 w-full"
+                        >
+                            <t-checkbox :value="Number(sid)">
+                                <span class="text-sm font-medium text-[var(--td-error-color)]">#{{ sid }}（服务器已删除）</span>
+                            </t-checkbox>
+                            <span class="ml-auto">
+                                <t-button variant="text" theme="danger" size="small" class="!px-1.5" @click="removeStaleBinding(Number(sid))">
+                                    <template #icon><close-icon /></template>
+                                    移除
+                                </t-button>
+                            </span>
+                        </div>
                     </t-checkbox-group>
                     <div v-if="instances.length === 0" class="text-xs text-[var(--td-text-color-secondary)] mt-1">
                         未获取到服务器列表
+                    </div>
+                    <div v-if="staleBindingIds.length > 0" class="text-xs text-[var(--td-error-color)] mt-1">
+                        该任务仍绑定 {{ staleBindingIds.length }} 台已删除的服务器，取消勾选或点「移除」即可清理
                     </div>
                 </t-form-item>
 
@@ -241,6 +260,7 @@ import { computed, h, onMounted, reactive, ref } from 'vue';
 import { Button, DialogPlugin, MessagePlugin, Switch, Tag } from 'tdesign-vue-next';
 import {
     AddIcon,
+    CloseIcon,
     CodeIcon,
     DeleteIcon,
     EditIcon,
@@ -357,6 +377,23 @@ const form = reactive<CronTaskPayload>({
 const instanceName = (id: number): string => {
     const inst = instances.value.find((i) => Number(i.id) === id);
     return inst ? String(inst.name) : `#${id}`;
+};
+
+const instanceExists = (id: number): boolean => instances.value.some((i) => Number(i.id) === id);
+
+// 编辑状态下任务仍绑定、但已不在服务器列表中的实例（服务器已被删除）。
+// 勾选组只渲染现有服务器，这类绑定没有对应选项，必须单独渲染才能取消勾选/移除。
+// 以 form.instanceIds 为准：用户取消勾选后行随即消失，与表单状态保持一致。
+const staleBindingIds = computed<number[]>(() => {
+    if (!editingId.value) return [];
+    const task = tasks.value.find((t) => t.id === editingId.value);
+    if (!task) return [];
+    const boundIds = new Set(task.bindings.map((b) => b.instanceId));
+    return [...boundIds].filter((id) => !instanceExists(id) && form.instanceIds.includes(id));
+});
+
+const removeStaleBinding = (id: number) => {
+    form.instanceIds = form.instanceIds.filter((i) => i !== id);
 };
 
 // ===== 数据加载 =====
@@ -570,7 +607,7 @@ const handleConfirmCreateAdvance = async () => {
     }
     advanceLoading.value = true;
     try {
-        // 提醒任务绑定原任务的全部服务器实例（任务绑定多服模型）
+        // 提醒任务绑定原任务的有效服务器实例（过滤已删除的失效绑定，避免新任务继承僵尸绑定）
         await cronTaskApi.create({
             name: advanceForm.value.name,
             cron: advanceForm.value.cron,
@@ -578,7 +615,9 @@ const handleConfirmCreateAdvance = async () => {
             type: 'command',
             enable: true,
             runWhenOffline: true,
-            instanceIds: advanceTargetTask.value.bindings.map((b) => b.instanceId),
+            instanceIds: advanceTargetTask.value.bindings
+                .map((b) => b.instanceId)
+                .filter((id) => instanceExists(id)),
         });
         MessagePlugin.success('提前提醒任务创建成功');
         showAdvanceModal.value = false;
@@ -718,20 +757,24 @@ const columns = () => [
             if (!row.bindings?.length) {
                 return h('span', { class: 'text-[var(--td-text-color-placeholder)]' }, '未绑定');
             }
-            return h('div', { class: 'flex flex-wrap gap-1' }, row.bindings.map((b: any) =>
-                h(
+            return h('div', { class: 'flex flex-wrap gap-1' }, row.bindings.map((b: any) => {
+                const gone = !instanceExists(b.instanceId);
+                return h(
                     Tag,
                     {
                         key: b.instanceId,
                         size: 'small',
                         variant: 'light',
-                        theme: 'primary',
+                        theme: gone ? 'warning' : 'primary',
                         class: '!rounded-md !px-2',
                         title: `上次执行: ${formatTime(b.lastRunTime)}`,
                     },
-                    { icon: () => h(ServerIcon, { class: 'opacity-80 shrink-0' }), default: () => ` ${instanceName(b.instanceId)}` },
-                ),
-            ));
+                    {
+                        icon: () => h(ServerIcon, { class: 'opacity-80 shrink-0' }),
+                        default: () => ` ${instanceName(b.instanceId)}${gone ? '（已删除）' : ''}`,
+                    },
+                );
+            }));
         },
     },
     {

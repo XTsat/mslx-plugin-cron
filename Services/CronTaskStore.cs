@@ -92,6 +92,43 @@ public class CronTaskStore
         return updated;
     }
 
+    /// <summary>
+    /// 跟随清理已删除服务器的绑定：移除实例已不存在的绑定条目；任务因此失去全部绑定则一并删除该任务。
+    /// 仅当确有删除时落盘；返回 (删除的绑定数, 删除的任务数)。调用方负责保证 instanceExists 基于有效的服务器清单。
+    /// </summary>
+    public (int RemovedBindings, int RemovedTasks) PruneDeletedInstances(Func<uint, bool> instanceExists)
+    {
+        var removedBindings = 0;
+        var removedTasks = 0;
+        UpdateTasks(tasks =>
+        {
+            for (var i = tasks.Count - 1; i >= 0; i--)
+            {
+                var task = tasks[i];
+                if (task.Bindings.Count == 0)
+                {
+                    continue; // 本就无绑定的任务不属于本次清理范畴，留给用户处理
+                }
+
+                var kept = task.Bindings.Where(b => instanceExists(b.InstanceId)).ToList();
+                removedBindings += task.Bindings.Count - kept.Count;
+                if (kept.Count == 0)
+                {
+                    tasks.RemoveAt(i); // 任务随其最后一名绑定服务器一起删除
+                    removedTasks++;
+                }
+                else
+                {
+                    task.Bindings = kept;
+                }
+            }
+
+            return removedBindings > 0 || removedTasks > 0 ? tasks : null;
+        });
+
+        return (removedBindings, removedTasks);
+    }
+
     private List<CronTaskDefinition> LoadTasksLocked()
     {
         if (!File.Exists(_tasksPath))

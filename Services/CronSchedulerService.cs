@@ -26,6 +26,11 @@ public class CronSchedulerService : IDisposable
     private readonly object _runningLock = new();
     private readonly List<(Task Run, CancellationTokenSource Cts)> _running = new();
 
+    // 服务器删除后的绑定跟随清理：周期巡检而非每 tick 执行，避免无谓的清单比对与落盘
+    private static readonly TimeSpan ServerCleanupInterval = TimeSpan.FromSeconds(60);
+    private DateTime _lastServerCleanupUtc = DateTime.MinValue;
+    private bool _serverInventoryReady;
+
     public CronSchedulerService(
         CronTaskStore store,
         IMCServerService mc)
@@ -176,6 +181,8 @@ public class CronSchedulerService : IDisposable
             return; // 迁移等操作暂停调度：本期 tick 不执行任何任务
         }
 
+        CleanupDeletedServerBindings();
+
         var nowUtc = DateTime.UtcNow;
         // 加载完整列表（含停用任务）：只对启用任务调度，但写回时不能把停用任务覆盖丢失
         var tasks = _store.LoadTasks();
@@ -225,6 +232,40 @@ public class CronSchedulerService : IDisposable
                     _running.RemoveAll(r => r.Run == execTask);
                 }
             }, TaskScheduler.Default);
+        }
+    }
+
+    /// <summary>
+    /// 服务器在宿主侧被删除后，其任务绑定不再有意义，默认跟随自动清理（前端手动移除仅作兜底）。
+    /// 周期巡检 + 落盘仅在确有删除时发生；宿主服务器清单未就绪前跳过，避免启动竞态把全部绑定误判为失效清空。
+    /// </summary>
+    private void CleanupDeletedServerBindings()
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastServerCleanupUtc < ServerCleanupInterval)
+        {
+            return;
+        }
+        _lastServerCleanupUtc = now;
+
+        var servers = MSLX.SDK.MSLX.Config.Servers.GetServerList();
+        if (servers == null)
+        {
+            return;
+        }
+        if (servers.Count == 0 && !_serverInventoryReady)
+        {
+            return; // 清单尚未加载（插件启动早于宿主配置加载）：本次跳过，下一周期再试
+        }
+        _serverInventoryReady = true;
+
+        var (removedBindings, removedTasks) = _store.PruneDeletedInstances(
+            id => MSLX.SDK.MSLX.Config.Servers.GetServer(id) != null);
+        if (removedBindings > 0 || removedTasks > 0)
+        {
+            MSLX.SDK.MSLX.Logger.Info(
+                $"[mslx-plugin-cron] 检测到已删除的服务器，自动清理 {removedBindings} 个失效绑定" +
+                (removedTasks > 0 ? $"、删除 {removedTasks} 个失去全部绑定的任务" : string.Empty));
         }
     }
 
