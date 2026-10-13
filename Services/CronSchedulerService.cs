@@ -300,13 +300,12 @@ public class CronSchedulerService : IDisposable
         }
         _serverInventoryReady = true;
 
-        var (removedBindings, removedTasks) = _store.PruneDeletedInstances(
+        var removedBindings = _store.PruneDeletedInstances(
             id => MSLX.SDK.MSLX.Config.Servers.GetServer(id) != null);
-        if (removedBindings > 0 || removedTasks > 0)
+        if (removedBindings > 0)
         {
             MSLX.SDK.MSLX.Logger.Info(
-                $"[mslx-plugin-cron] 检测到已删除的服务器，自动清理 {removedBindings} 个失效绑定" +
-                (removedTasks > 0 ? $"、删除 {removedTasks} 个失去全部绑定的任务" : string.Empty));
+                $"[mslx-plugin-cron] 检测到已删除的服务器，自动清理 {removedBindings} 个失效绑定（任务本身保留，绑定列表为空）");
         }
     }
 
