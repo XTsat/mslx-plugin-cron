@@ -15,7 +15,9 @@ namespace MSLX.Plugin.Cron.Services;
 public class CronSchedulerService : IDisposable
 {
     private readonly CronTaskStore _store;
-    private readonly IMCServerService _mc;
+    private readonly IInstanceLifecycleService _lifecycle;
+    private readonly IInstanceConsoleService _console;
+    private readonly IInstanceBackupService _backup;
 
     private CancellationTokenSource? _cts;
     private Task? _loop;
@@ -37,10 +39,14 @@ public class CronSchedulerService : IDisposable
 
     public CronSchedulerService(
         CronTaskStore store,
-        IMCServerService mc)
+        IInstanceLifecycleService lifecycle,
+        IInstanceConsoleService console,
+        IInstanceBackupService backup)
     {
         _store = store;
-        _mc = mc;
+        _lifecycle = lifecycle;
+        _console = console;
+        _backup = backup;
     }
 
     /// <summary>
@@ -343,6 +349,8 @@ public class CronSchedulerService : IDisposable
     {
         MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 执行定时任务 [{task.Name}] ({task.Type}) → 实例 {instanceId}");
 
+        // 插件任务发布到宿主全局事件总线：TaskId 是插件自有任务 GUID（宿主任务表不存在该 ID），
+        // 当前宿主与其它插件均无 OnTask* 订阅者；若未来有人按宿主 TaskId 关联状态，需知晓此跨插件契约
         var executingArgs = new TaskExecutingEventArgs
         {
             TaskId = task.Id,
@@ -436,19 +444,19 @@ public class CronSchedulerService : IDisposable
         switch (task.Type.ToLower())
         {
             case "command":
-                var ok = _mc.SendCommand(instanceId, task.Payload);
+                var ok = _console.SendCommand(instanceId, task.Payload);
                 return ok
                     ? (true, "命令已发送")
                     : (false, $"命令发送失败 (实例 {instanceId} 可能未运行)");
 
             case "start":
-                var start = _mc.StartServer(instanceId);
+                var start = _lifecycle.StartServer(instanceId);
                 return start.success
                     ? (true, "启动指令已下发")
                     : (false, $"启动失败: {start.message}");
 
             case "stop":
-                var stopped = _mc.StopServer(instanceId);
+                var stopped = _lifecycle.StopServer(instanceId);
                 return stopped ? (true, "停止指令已下发") : (false, "停止失败");
 
             case "restart":
@@ -456,7 +464,7 @@ public class CronSchedulerService : IDisposable
                 return (true, "重启完成");
 
             case "backup":
-                var backed = _mc.StartBackupServer(instanceId);
+                var backed = _backup.StartBackupServer(instanceId);
                 return backed ? (true, "备份已开始") : (false, "备份启动失败");
 
             case "shell":
@@ -473,9 +481,9 @@ public class CronSchedulerService : IDisposable
     /// </summary>
     private async Task HandleRestartAsync(uint instanceId, string payload, CancellationToken cancellationToken)
     {
-        if (!_mc.IsServerRunning(instanceId))
+        if (!_lifecycle.IsServerRunning(instanceId))
         {
-            var offlineStart = _mc.StartServer(instanceId);
+            var offlineStart = _lifecycle.StartServer(instanceId);
             if (!offlineStart.success)
             {
                 throw new Exception($"启动失败: {offlineStart.message}");
@@ -487,14 +495,14 @@ public class CronSchedulerService : IDisposable
 
         if (!string.IsNullOrWhiteSpace(payload))
         {
-            _mc.SendCommand(instanceId, $"say [计划任务] {payload}");
+            _console.SendCommand(instanceId, $"say [计划任务] {payload}");
         }
 
-        _mc.SendCommand(instanceId, FormatRestartBroadcast(60));
+        _console.SendCommand(instanceId, FormatRestartBroadcast(60));
 
         for (var i = 60; i > 0; i--)
         {
-            if (!_mc.IsServerRunning(instanceId))
+            if (!_lifecycle.IsServerRunning(instanceId))
             {
                 MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 实例 {instanceId} 在重启倒计时期间已停止，取消重启操作。");
                 return;
@@ -502,23 +510,23 @@ public class CronSchedulerService : IDisposable
 
             if (i == 30 || i == 10 || i == 5)
             {
-                _mc.SendCommand(instanceId, FormatRestartBroadcast(i));
+                _console.SendCommand(instanceId, FormatRestartBroadcast(i));
             }
 
             await Task.Delay(1000, cancellationToken);
         }
 
-        _mc.SendCommand(instanceId, "tellraw @a [{\"text\":\"[\",\"color\":\"yellow\"},{\"text\":\"MSLX\",\"color\":\"green\"},{\"text\":\"]\",\"color\":\"yellow\"},{\"text\":\"服务器即将重启...\",\"color\":\"aqua\"}]");
+        _console.SendCommand(instanceId, "tellraw @a [{\"text\":\"[\",\"color\":\"yellow\"},{\"text\":\"MSLX\",\"color\":\"green\"},{\"text\":\"]\",\"color\":\"yellow\"},{\"text\":\"服务器即将重启...\",\"color\":\"aqua\"}]");
         await Task.Delay(1000, cancellationToken); // 确保发包给客户端
 
-        var stopped = _mc.StopServer(instanceId);
+        var stopped = _lifecycle.StopServer(instanceId);
         if (!stopped)
         {
             throw new Exception("停止实例失败");
         }
 
         var retry = 0;
-        while (_mc.IsServerRunning(instanceId) && retry < 30)
+        while (_lifecycle.IsServerRunning(instanceId) && retry < 30)
         {
             await Task.Delay(1000, cancellationToken);
             retry++;
@@ -526,7 +534,7 @@ public class CronSchedulerService : IDisposable
 
         await Task.Delay(2000, cancellationToken);
 
-        var start = _mc.StartServer(instanceId);
+        var start = _lifecycle.StartServer(instanceId);
         if (!start.success)
         {
             throw new Exception($"启动失败: {start.message}");
@@ -549,7 +557,7 @@ public class CronSchedulerService : IDisposable
         uint instanceId,
         CancellationToken cancellationToken)
     {
-        if (!task.RunWhenOffline && !_mc.IsServerRunning(instanceId))
+        if (!task.RunWhenOffline && !_lifecycle.IsServerRunning(instanceId))
         {
             throw new Exception($"实例 {instanceId} 处于离线状态，且配置为未运行时不执行");
         }

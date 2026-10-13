@@ -19,7 +19,7 @@
     <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="10.0.7" />
     <PackageReference Include="Cronos" Version="0.13.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
-    <PackageReference Include="MSLX.SDK" Version="1.6.3.3-dev-202609171123" ExcludeAssets="runtime"/>
+    <PackageReference Include="MSLX.SDK" Version="1.7.2" ExcludeAssets="runtime"/>
   </ItemGroup>
 
   <ItemGroup>
@@ -68,7 +68,7 @@
             InputAssemblies="@(FinalInputAssemblies)"
             TargetKind="SameAsPrimaryAssembly"
             OutputFile="$(OutputPath)$(AssemblyName).dll"
-            LibraryPath="$(OutputPath);$(NuGetPackageRoot)mslx.sdk/1.6.3.3-dev-202609171123/lib/net10.0" />
+            LibraryPath="$(OutputPath);$(NuGetPackageRoot)mslx.sdk/1.7.2/lib/net10.0" />
 
     <Delete Files="@(DependenciesToMerge)" Condition="'@(DependenciesToMerge)' != ''" />
     <Delete Files="@(GarbageFiles)" />
