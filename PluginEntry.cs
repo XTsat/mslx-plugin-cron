@@ -19,7 +19,7 @@ public class PluginEntry : IPlugin
     public string Id => "mslx-plugin-cron";
     public string Name => "定时任务绑定";
     public string Description => "在定时任务提供「任务绑定多服务器」反向绑定：同一任务可启用至多台服务器统一执行。";
-    public string Version => "1.0.2";
+    public string Version => "1.0.3";
     public string MinSDKVersion => "1.7.0";
     public string Developer => "XTsat";
     public string AuthorUrl => "https://github.com/XTsat";
