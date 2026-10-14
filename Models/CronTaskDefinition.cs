@@ -83,13 +83,20 @@ public class MigrationRecord
 public class HostTaskRecord
 {
     public const string StatusPending = "pending";
+    /// <summary>宿主任务已禁用、插件侧归并尚未落盘：归并完成后转为 <see cref="StatusAdopted"/>。</summary>
+    public const string StatusDisabled = "disabled";
+    /// <summary>归并已落盘、彻底完成接管：后续增量导入不再重走归并（避免复活被用户修改/停用/删除的任务）。</summary>
+    public const string StatusAdopted = "adopted";
+    /// <summary>v1.0.x 序列化的旧状态值，读取时归一化为 adopted / disabled（见 CronMigrationService）。</summary>
     public const string StatusDone = "done";
 
     [JsonProperty("taskId")] public string TaskId { get; set; } = "";
     [JsonProperty("instanceId")] public uint InstanceId { get; set; }
     [JsonProperty("originalEnable")] public bool OriginalEnable { get; set; }
     /// <summary>
-    /// 接管进度：pending = 原状态已持久化、宿主任务尚未确认禁用成功；done = 宿主任务已禁用、插件侧已接管。
+    /// 接管进度：pending = 原状态已持久化、宿主任务尚未确认禁用成功；
+    /// disabled = 宿主任务已禁用、插件归并尚未确认落盘（崩溃后可补归并）；
+    /// adopted = 归并已落盘、彻底完成接管。
     /// </summary>
     [JsonProperty("status")] public string Status { get; set; } = StatusPending;
 }

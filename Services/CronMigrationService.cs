@@ -7,9 +7,10 @@ namespace MSLX.Plugin.Cron.Services;
 /// 宿主旧任务 → 多服任务 迁移服务。
 /// 归并键：(Type 小写, Cron 去空白, Payload, RunWhenOffline, 启停状态)。
 /// 接管流程（迁移期间暂停插件调度，避免双跑）：
-/// 先持久化「原启停状态 + 待接管进度」→ 宿主任务逐个禁用（成功才标记 done）→
-/// 仅对 done 的宿主任务做插件归并（事务内读改写）→ 归并落盘后标记 PluginTasksMerged。
+/// 先持久化「原启停状态 + 待接管进度」→ 宿主任务逐个禁用（成功才标记 disabled）→
+/// 仅对 disabled 的宿主任务做插件归并（事务内读改写）→ 归并落盘后统一标记 adopted。
 /// 任何中间态失败都不会让宿主与插件同时执行；中断后重试按迁移记录恢复。
+/// adopted 条目不再重走归并，避免用户修改/停用/删除的任务在增量导入时被复活。
 /// 卸载时按迁移记录还原宿主任务。
 /// </summary>
 public class CronMigrationService
@@ -26,12 +27,14 @@ public class CronMigrationService
 
     /// <summary>
     /// 导入宿主任务（幂等增量，可反复调用）：
-    /// - 迁移记录中已接管(done)的宿主任务 → 跳过；pending 的按宿主任务 ID 恢复重试；
+    /// - 迁移记录中已彻底接管(adopted)的宿主任务 → 跳过；pending/disabled（上次中断遗留）按宿主任务 ID 恢复重试；
     /// - 新任务按 (Type, Cron, Payload, RunWhenOffline, 原启停状态) 归并：与已有插件任务同键
     ///   且启停状态一致则把实例并入 Bindings，否则新建插件任务（保留宿主原启停状态）；
     /// - 接管顺序：先持久化原状态与进度，再禁用宿主任务，最后归并插件任务——
     ///   禁用失败的任务保持 pending、不归并，不会出现宿主与插件同时执行；
-    ///   记录写入失败时因原状态已提前落盘，重试按 ID 恢复，不会重复导入或丢失原启用状态。
+    ///   记录写入失败时因原状态已提前落盘，重试按 ID 恢复，不会重复导入或丢失原启用状态；
+    /// - 归并范围仅限本次新接管(pending→disabled)的任务：已彻底接管的 adopted 条目不再重走归并，
+    ///   否则用户后续在插件侧停用/修改/删除的任务会被当成宿主新任务重新创建（复活）。
     /// 迁移期间暂停插件调度；迁移请求串行化执行。
     /// </summary>
     public MigrationResult Migrate()
@@ -39,6 +42,7 @@ public class CronMigrationService
         // 串行化迁移请求：并发点击不会交错处理同一批宿主任务
         lock (_migrateLock)
         {
+            NormalizeRecordStatuses();
             var record = _store.LoadMigration() ?? new MigrationRecord { MigratedAt = DateTime.Now };
             var hostTasks = MSLX.SDK.MSLX.Config.Tasks.GetTaskList().ToList();
             if (hostTasks.Count == 0)
@@ -46,14 +50,15 @@ public class CronMigrationService
                 return new MigrationResult { Skipped = true, Reason = "宿主没有定时任务可导入" };
             }
 
-            var doneIds = record.HostTasks
-                .Where(r => r.Status == HostTaskRecord.StatusDone)
+            var adoptedIds = record.HostTasks
+                .Where(r => r.Status == HostTaskRecord.StatusAdopted)
                 .Select(r => r.TaskId).ToHashSet();
             var pendingBefore = record.HostTasks
-                .Where(r => r.Status == HostTaskRecord.StatusPending).Count();
-            // 全新任务 = 迁移记录中完全不存在的宿主任务；pending 的按 ID 恢复，不再当作新任务重复导入
+                .Where(r => r.Status == HostTaskRecord.StatusPending ||
+                            r.Status == HostTaskRecord.StatusDisabled).Count();
+            // 全新任务 = 迁移记录中完全不存在的宿主任务；pending/disabled 的按 ID 恢复，不再当作新任务重复导入
             var fresh = hostTasks.Where(t =>
-                !doneIds.Contains(t.ID) &&
+                !adoptedIds.Contains(t.ID) &&
                 record.HostTasks.All(r => r.TaskId != t.ID)).ToList();
             if (fresh.Count == 0 && pendingBefore == 0 && record.PluginTasksMerged)
             {
@@ -77,7 +82,7 @@ public class CronMigrationService
                 }
                 _store.SaveMigration(record);
 
-                // ② 逐个接管：禁用成功才标记 done 并持久化进度；失败/异常保持 pending（不归并），下次按 ID 重试
+                // ② 逐个接管：禁用成功才标记 disabled（归并前中间态）并持久化进度；失败/异常保持 pending（不归并），下次按 ID 重试
                 var failedCount = 0;
                 var migrated = 0;
                 foreach (var entry in record.HostTasks
@@ -86,8 +91,8 @@ public class CronMigrationService
                     var hostTask = hostTasks.FirstOrDefault(t => t.ID == entry.TaskId);
                     if (hostTask == null)
                     {
-                        // 宿主任务已被并发删除：无可接管也无须还原，标记完成避免反复重试
-                        entry.Status = HostTaskRecord.StatusDone;
+                        // 宿主任务已被并发删除：无可接管也无须还原，直接标记 adopted 避免反复重试
+                        entry.Status = HostTaskRecord.StatusAdopted;
                         _store.SaveMigration(record);
                         continue;
                     }
@@ -112,14 +117,19 @@ public class CronMigrationService
                         }
                     }
 
-                    // 禁用成功（或上次已禁用）才登记 done；此处记录写失败由调用方提示重试，重试时再禁用是幂等的
-                    entry.Status = HostTaskRecord.StatusDone;
+                    // 禁用成功（或上次已禁用）先落盘 disabled：归并完成后在阶段④再转 adopted；
+                    // 若此步与归并之间进程崩溃，disabled 条目在下次导入时补归并而不是被当作全新任务重复创建
+                    entry.Status = HostTaskRecord.StatusDisabled;
                     _store.SaveMigration(record);
                     migrated++;
                 }
 
-                // ③ 仅归并已接管(done)的宿主任务；事务内读改写，防止旧快照覆盖并发创建/修改/删除的任务
+                // ③ 仅归并本次新接管(disabled)的宿主任务；事务内读改写，防止旧快照覆盖并发创建/修改/删除的任务。
+                // 已彻底接管(adopted)的历史条目不在此列：用户可能已在插件侧停用/修改/删除对应任务，
+                // 若再次归并会按历史 OriginalEnable 把它们重新创建（复活），故归并动作只允许对本次新接管发生一次。
                 var items = new List<MigrationItem>();
+                var adoptees = record.HostTasks
+                    .Where(r => r.Status == HostTaskRecord.StatusDisabled).ToList();
                 var mergedTasks = _store.UpdateTasks(tasks =>
                 {
                     var byKey = new Dictionary<string, CronTaskDefinition>();
@@ -133,12 +143,12 @@ public class CronMigrationService
                     }
 
                     var changed = false;
-                    foreach (var entry in record.HostTasks.Where(r => r.Status == HostTaskRecord.StatusDone))
+                    foreach (var entry in adoptees)
                     {
                         var hostTask = hostTasks.FirstOrDefault(t => t.ID == entry.TaskId);
                         if (hostTask == null)
                         {
-                            continue; // 宿主任务已不存在，不重建
+                            continue; // 宿主任务已不存在，不重建；阶段④统一标记 adopted 完成
                         }
 
                         // 归并键使用已持久化的原启停状态：此时宿主任务已被禁用，不能再读宿主当前状态
@@ -179,7 +189,12 @@ public class CronMigrationService
                     return changed ? tasks : null; // 无实际变化不落盘
                 });
 
-                // ④ 归并落盘（或确认无需变更）后标记完成，中断后重试不再误判、也不丢失已禁用未保存的进度
+                // ④ 所有待接管(disabled)条目无论归并是否产生实际变化，统一落盘为 adopted（彻底完成），
+                //    并标记整个迁移记录完成；中断后重试不再误判、也不会丢失已禁用未保存的进度。
+                foreach (var entry in record.HostTasks.Where(r => r.Status == HostTaskRecord.StatusDisabled))
+                {
+                    entry.Status = HostTaskRecord.StatusAdopted;
+                }
                 record.PluginTasksMerged = true;
                 _store.SaveMigration(record);
 
@@ -209,6 +224,38 @@ public class CronMigrationService
     }
 
     /// <summary>
+    /// 兼容 v1.0.x：旧记录把「宿主已禁用」与「插件已归并」都记为 done，无法逐条区分。
+    /// 但迁移记录级标志 PluginTasksMerged 足以区分两种历史状态：
+    /// - PluginTasksMerged = true  → 归并早已落盘（完整迁移）→ 归一化为 adopted，绝不重走归并；
+    /// - PluginTasksMerged = false → 崩溃在归并落盘前的半完成态 → 归一化为 disabled，补归并一次后转 adopted。
+    /// </summary>
+    private void NormalizeRecordStatuses()
+    {
+        var record = _store.LoadMigration();
+        if (record == null)
+        {
+            return;
+        }
+
+        var changed = false;
+        foreach (var r in record.HostTasks)
+        {
+            if (r.Status == HostTaskRecord.StatusDone)
+            {
+                r.Status = record.PluginTasksMerged
+                    ? HostTaskRecord.StatusAdopted
+                    : HostTaskRecord.StatusDisabled;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            _store.SaveMigration(record);
+        }
+    }
+
+    /// <summary>
     /// 导入预览（干跑）：与 Migrate 相同的判重/归并逻辑，但不写任何数据，
     /// 返回「点击导入后会发生什么」的清单，供前端先展示、用户确认后再真正导入。
     /// </summary>
@@ -229,11 +276,12 @@ public class CronMigrationService
             return new MigrationPreview { Skipped = true, Reason = "宿主没有定时任务可导入" };
         }
 
-        // 仅已接管(done)的宿主任务视为已导入；pending（上次中断遗留）仍出现在预览中，供用户重新执行迁移完成接管
-        var doneIds = record?.HostTasks
-            .Where(r => r.Status == HostTaskRecord.StatusDone)
+        // 仅已彻底接管(adopted)的宿主任务视为已导入；pending/disabled（上次中断遗留）仍出现在预览中，
+        // 供用户重新执行迁移完成接管
+        var adoptedIds = record?.HostTasks
+            .Where(r => r.Status == HostTaskRecord.StatusAdopted || r.Status == HostTaskRecord.StatusDone)
             .Select(r => r.TaskId).ToHashSet() ?? new HashSet<string>();
-        var fresh = hostTasks.Where(t => !doneIds.Contains(t.ID)).ToList();
+        var fresh = hostTasks.Where(t => !adoptedIds.Contains(t.ID)).ToList();
         if (fresh.Count == 0)
         {
             return new MigrationPreview { Skipped = true, Reason = "没有新的宿主任务需要导入（已全部接管）" };
@@ -337,7 +385,8 @@ public class CronMigrationService
         if (record != null)
         {
             // 存在待接管(pending)条目时迁移未完成：前端需继续提示迁移，而不是误报已迁移
-            if (record.HostTasks.Any(r => r.Status == HostTaskRecord.StatusPending))
+            if (record.HostTasks.Any(r => r.Status == HostTaskRecord.StatusPending ||
+                                         r.Status == HostTaskRecord.StatusDisabled))
             {
                 return (false, "迁移尚未完成，有待接管任务", _store.LoadTasks().Count, record.MigratedAt);
             }
