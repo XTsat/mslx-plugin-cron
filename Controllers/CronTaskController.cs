@@ -368,18 +368,19 @@ public class CronTaskController : ControllerBase
             }
         }
 
-        var results = new List<TaskRunResult>();
-        foreach (var binding in task.Bindings)
+        // 并行分发到各绑定服务器，与定时调度路径一致，避免串行执行拖长总耗时
+        // （如多台 restart 每台约 75 秒，串行会超过前端 120s 超时）
+        var results = (await Task.WhenAll(task.Bindings.Select(async binding =>
         {
             // 与定时任务共用执行路径并登记到调度器 _running：卸载时可取消并等待手动执行退出
             var (success, message) = await _scheduler.RunNowAsync(task, binding.InstanceId);
-            results.Add(new TaskRunResult
+            return new TaskRunResult
             {
                 InstanceId = binding.InstanceId,
                 Success = success,
                 Message = message
-            });
-        }
+            };
+        }))).ToList();
 
         return Ok(new ApiResponse<List<TaskRunResult>>
         {
