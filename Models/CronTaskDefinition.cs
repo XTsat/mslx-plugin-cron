@@ -51,8 +51,8 @@ public class CronTaskRequest
 
     public bool RunWhenOffline { get; set; } = true;
 
-    [Required(ErrorMessage = "请至少选择一台服务器")]
-    [MinLength(1, ErrorMessage = "请至少选择一台服务器")]
+    // 任务与绑定分离：允许为空，创建时不选服务器也能保存，稍后编辑再绑定；
+    // 也允许编辑时清空全部绑定（含已删除服务器的失效绑定）
     public List<uint> InstanceIds { get; set; } = new();
 }
 

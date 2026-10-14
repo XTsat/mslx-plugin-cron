@@ -162,6 +162,9 @@
                     <div v-if="staleBindingIds.length > 0" class="text-xs text-[var(--td-error-color)] mt-1">
                         该任务仍绑定 {{ staleBindingIds.length }} 台已删除的服务器，取消勾选或点「移除」即可清理
                     </div>
+                    <div class="text-xs text-[var(--td-text-color-secondary)] mt-1">
+                        可不选择服务器直接保存，创建后随时编辑绑定；清空全部绑定后任务暂停调度，待重新绑定恢复
+                    </div>
                 </t-form-item>
 
                 <t-form-item label="初始状态" name="enable">
@@ -533,10 +536,6 @@ const openEdit = (task: CronTaskDefinition) => {
 const save = async () => {
     if (!form.name.trim()) {
         MessagePlugin.warning('任务名称不能为空');
-        return;
-    }
-    if (form.instanceIds.length === 0) {
-        MessagePlugin.warning('请至少选择一台绑定服务器');
         return;
     }
 
