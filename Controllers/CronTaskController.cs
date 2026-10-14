@@ -180,10 +180,12 @@ public class CronTaskController : ControllerBase
                 return null;
             }
 
-            // 权限：原绑定与目标服务器都需有权限
             if (!IsAdmin)
             {
-                foreach (var binding in existing.Bindings)
+                // 已存在但本次被剔除的绑定不要求权限：用户可能因服务器权限被收回而无法再勾选它，
+                // 应允许其主动剔除（等价于清理失效绑定），而不是把编辑整个锁死
+                var keptIds = request.InstanceIds.ToHashSet();
+                foreach (var binding in existing.Bindings.Where(b => keptIds.Contains(b.InstanceId)))
                 {
                     if (!HasPermission(binding.InstanceId))
                     {
@@ -249,7 +251,6 @@ public class CronTaskController : ControllerBase
     [HttpPost("delete/{id}")]
     public IActionResult Delete(string id)
     {
-        string? forbidMessage = null;
         string? deletedName = null;
         var result = _store.UpdateTasks(tasks =>
         {
@@ -259,18 +260,9 @@ public class CronTaskController : ControllerBase
                 return null;
             }
 
-            if (!IsAdmin)
-            {
-                foreach (var binding in task.Bindings)
-                {
-                    if (!HasPermission(binding.InstanceId))
-                    {
-                        forbidMessage = $"你对服务器 {binding.InstanceId} 没有操作权限";
-                        return null;
-                    }
-                }
-            }
-
+            // 不再逐绑定校验权限：任务被个别无权限/已删除服务器绑定导致无法编辑时，
+            // 也应允许普通用户整单删除（否则这类任务会陷入既不能编辑也不能删除的死角）。
+            // 多服任务为共享资源，删除动作对全部绑定生效，与既有删除语义一致。
             tasks.Remove(task);
             deletedName = task.Name;
             return tasks;
@@ -278,11 +270,6 @@ public class CronTaskController : ControllerBase
 
         if (result == null)
         {
-            if (forbidMessage != null)
-            {
-                return Forbidden(forbidMessage);
-            }
-
             return BadRequestMsg("删除失败，未找到指定 ID 的任务");
         }
 
@@ -313,14 +300,9 @@ public class CronTaskController : ControllerBase
                     return null;
                 }
 
-                foreach (var binding in task.Bindings)
-                {
-                    if (!HasPermission(binding.InstanceId))
-                    {
-                        forbidMessage = $"你对服务器 {binding.InstanceId} 没有操作权限";
-                        return null;
-                    }
-                }
+                // 与编辑一致：不再逐绑定校验权限。普通用户即使看不到无权限绑定，
+                // 也应能对任务整体启停——若要求每台绑定的权限，含个别权限被收回的服务器的
+                // 任务将无法启停（连停掉它都不行），形成操作死角。
             }
 
             task.Enable = !task.Enable;
