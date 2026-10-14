@@ -467,4 +467,29 @@ public class CronTaskController : ControllerBase
             }
         });
     }
+
+    /// <summary>
+    /// 手动还原全部宿主任务（仅管理员，兜底）：把迁移时禁用的宿主任务按原启停状态恢复。
+    /// 卸载插件前的应急通道——正常情况下宿主任务由插件持续接管、保持禁用。
+    /// 迁移动态为增量幂等设计，还原后保留迁移记录，已导入任务不会重复出现在导入预览中。
+    /// </summary>
+    [HttpPost("migrate-restore")]
+    public IActionResult MigrateRestore()
+    {
+        if (!IsAdmin)
+        {
+            return Forbidden("仅管理员可执行还原");
+        }
+
+        try
+        {
+            _migration.Restore();
+            return Ok(new ApiResponse<object> { Code = 200, Message = "已按迁移记录还原宿主任务（迁移记录保留，已导入任务不再出现在导入预览）" });
+        }
+        catch (Exception ex)
+        {
+            MSLX.SDK.MSLX.Logger.Error("[mslx-plugin-cron] 还原宿主任务失败", ex);
+            return BadRequestMsg($"还原失败: {ex.Message}");
+        }
+    }
 }

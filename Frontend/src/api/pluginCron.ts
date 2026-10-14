@@ -88,6 +88,7 @@ export const cronTaskApi = {
     migrate: () => request.post({ url: `${BASE}/migrate` }, NODE_REQUEST),
     migratePreview: () => request.post<MigrationPreview>({ url: `${BASE}/migrate-preview` }, NODE_REQUEST),
     migrateStatus: () => request.get<MigrationStatus>({ url: `${BASE}/migrate-status` }, NODE_REQUEST),
+    migrateRestore: () => request.post({ url: `${BASE}/migrate-restore` }, NODE_REQUEST),
 };
 
 // ===== 宿主实例 API =====

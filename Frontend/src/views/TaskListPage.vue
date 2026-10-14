@@ -17,6 +17,16 @@
                     返回原版定时任务
                 </t-button>
                 <t-button
+                    v-if="isAdmin"
+                    variant="text"
+                    theme="default"
+                    :loading="restoring"
+                    @click="doRestoreMigration"
+                >
+                    <template #icon><rollback-icon /></template>
+                    还原宿主任务
+                </t-button>
+                <t-button
                     v-if="!migration.migrated"
                     theme="warning"
                     variant="outline"
@@ -490,6 +500,33 @@ const loadMigrationStatus = async () => {
     } catch {
         migration.value = { migrated: true, taskCount: 0 };
     }
+};
+
+// ===== 还原宿主任务（兜底，仅管理员） =====
+
+const restoring = ref(false);
+
+const doRestoreMigration = async () => {
+    if (restoring.value) return;
+    const confirmDlg = DialogPlugin.confirm({
+        header: '还原宿主任务',
+        body: '将按迁移记录把之前禁用的宿主「定时任务」恢复为原有启用状态。\n\n正常情况下宿主任务由本插件持续接管（保持禁用）；请仅在卸载插件或计划不再使用本插件时执行。\n\n还原后迁移记录保留，已导入任务不会再次出现在导入预览中。',
+        theme: 'warning',
+        confirmBtn: '确认还原',
+        cancelBtn: '取消',
+        onConfirm: async () => {
+            confirmDlg.destroy();
+            restoring.value = true;
+            try {
+                await cronTaskApi.migrateRestore();
+                MessagePlugin.success('已还原宿主任务');
+            } catch (e: any) {
+                MessagePlugin.error('还原失败: ' + (e?.message || '未知错误'));
+            } finally {
+                restoring.value = false;
+            }
+        },
+    });
 };
 
 // ===== 返回原版定时任务 =====
