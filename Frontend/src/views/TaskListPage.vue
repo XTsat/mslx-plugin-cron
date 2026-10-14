@@ -2,7 +2,7 @@
     <div class="mx-auto flex flex-col gap-6 text-[var(--td-text-color-primary)] pb-5">
         <!-- 头部卡片 -->
         <div
-            class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 bg-[var(--td-bg-color-container)]/80 rounded-2xl border border-[var(--td-component-border)] shadow-sm text-left"
+            class="design-card flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 bg-[var(--td-bg-color-container)]/80 rounded-2xl border border-[var(--td-component-border)] shadow-sm text-left"
         >
             <div class="flex flex-col gap-1 items-start">
                 <h2 class="text-lg font-bold tracking-tight text-[var(--td-text-color-primary)] m-0">定时任务绑定</h2>
@@ -59,7 +59,7 @@
 
             <div
                 v-else-if="tasks.length > 0"
-                class="bg-[var(--td-bg-color-container)]/80 rounded-2xl border border-[var(--td-component-border)] shadow-sm p-5"
+                class="design-card bg-[var(--td-bg-color-container)]/80 rounded-2xl border border-[var(--td-component-border)] shadow-sm p-5"
             >
                 <t-table
                     row-key="id"
@@ -77,7 +77,7 @@
 
             <div
                 v-else
-                class="flex flex-col items-center justify-center py-24 bg-white/40 dark:bg-zinc-800/40 rounded-2xl border-2 border-dashed border-[var(--td-component-border)]"
+                class="design-card flex flex-col items-center justify-center py-24 bg-white/40 dark:bg-zinc-800/40 rounded-2xl border-2 border-dashed border-[var(--td-component-border)]"
             >
                 <t-empty class="!bg-transparent" description="尚未配置任何多服定时任务" />
             </div>
