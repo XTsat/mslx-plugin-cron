@@ -8,7 +8,8 @@ namespace MSLX.Plugin.Cron.Controllers;
 /// <summary>
 /// 多服定时任务 REST API。
 /// 鉴权模式与宿主 CronTaskController 一致：UserId claim + HasResourcePermission("server", instanceId)，
-/// shell 类型仅管理员。非管理员查看列表时按权限过滤绑定服务器。
+/// shell 类型仅管理员。非管理员查看列表时按权限过滤绑定服务器（自己的任务始终可见）；
+/// 编辑包含其无权限服务器的任务被禁止——需要个人版本时用「复制任务」创建无绑定副本自行配置。
 /// </summary>
 [ApiController]
 [Route("api/plugins/mslx-plugin-cron/tasks")]
@@ -55,7 +56,8 @@ public class CronTaskController : ControllerBase
             foreach (var task in tasks)
             {
                 var allowed = task.Bindings.Where(b => HasPermission(b.InstanceId)).ToList();
-                if (allowed.Count > 0)
+                // 至少一台绑定有权限 或 自己是创建者（含未绑定服务器的副本）才可见；绑定裁剪为有权限的子集
+                if (allowed.Count > 0 || task.CreatorUserId == UserId)
                 {
                     task.Bindings = allowed;
                     filtered.Add(task);
@@ -86,7 +88,8 @@ public class CronTaskController : ControllerBase
         if (!IsAdmin)
         {
             task.Bindings = task.Bindings.Where(b => HasPermission(b.InstanceId)).ToList();
-            if (task.Bindings.Count == 0)
+            // 自己的任务（含未绑定服务器的副本）即使无可操作绑定也可见，其余任务裁剪后为空视为不可见
+            if (task.Bindings.Count == 0 && task.CreatorUserId != UserId)
             {
                 return NotFoundMsg("未找到指定 ID 的任务");
             }
@@ -138,7 +141,8 @@ public class CronTaskController : ControllerBase
                 Bindings = request.InstanceIds
                     .Distinct()
                     .Select(i => new TaskBinding { InstanceId = i, LastRunTime = null })
-                    .ToList()
+                    .ToList(),
+                CreatorUserId = UserId
             };
             tasks.Add(task);
             created = task;
@@ -152,6 +156,68 @@ public class CronTaskController : ControllerBase
 
         MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 创建任务 [{created!.Name}] 绑定 {created.Bindings.Count} 台服务器");
         return Ok(new ApiResponse<string> { Code = 200, Message = "任务创建成功", Data = created.Id });
+    }
+
+    /// <summary>
+    /// 复制任务为不带任何绑定服务器的独立副本。
+    /// 共享任务（含无权限服务器的任务）普通用户无法直接修改，借此获得自己的版本后在副本上配置有权限的服务器。
+    /// </summary>
+    [HttpPost("copy/{id}")]
+    public IActionResult Copy(string id)
+    {
+        var source = _store.LoadTasks().FirstOrDefault(t => t.Id == id);
+        if (source == null)
+        {
+            return NotFoundMsg("未找到指定 ID 的任务");
+        }
+
+        if (!IsAdmin)
+        {
+            // 与列表可见性一致：至少一台绑定服务器有权限才可复制（完全无权限的任务对普通用户本就不可见）
+            if (!source.Bindings.Any(b => HasPermission(b.InstanceId)))
+            {
+                return Forbidden("你对该任务绑定的服务器都没有操作权限");
+            }
+
+            // 副本继承源任务的 shell 类型；普通用户无法创建/执行/启用 shell 任务，复制只会得到不可用的死副本
+            if (source.Type?.ToLower() == "shell")
+            {
+                return Forbidden("仅管理员可复制 shell 类型的定时任务");
+            }
+        }
+
+        CronTaskDefinition? created = null;
+        var result = _store.UpdateTasks(tasks =>
+        {
+            var task = new CronTaskDefinition
+            {
+                Name = source.Name,
+                Cron = source.Cron,
+                Type = source.Type,
+                Payload = source.Payload,
+                Enable = source.Enable,
+                RunWhenOffline = source.RunWhenOffline,
+                // 副本不继承任何绑定服务器：由复制者自行配置自己有权限的服务器
+                Bindings = new List<TaskBinding>(),
+                CreatorUserId = UserId
+            };
+            tasks.Add(task);
+            created = task;
+            return tasks;
+        });
+
+        if (result == null || created == null)
+        {
+            return BadRequestMsg("任务复制失败，请重试");
+        }
+
+        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 用户 {UserId} 复制任务 [{source.Name}] 为无绑定副本 [{created.Name}]");
+        return Ok(new ApiResponse<CronTaskDefinition>
+        {
+            Code = 200,
+            Message = "已复制为无绑定服务器的新任务，可在副本上配置你有权限的服务器",
+            Data = created
+        });
     }
 
     /// <summary>更新多服任务（bindings 按 InstanceId 重建，保留原 LastRunTime）</summary>
@@ -182,16 +248,13 @@ public class CronTaskController : ControllerBase
 
             if (!IsAdmin)
             {
-                // 已存在但本次被剔除的绑定不要求权限：用户可能因服务器权限被收回而无法再勾选它，
-                // 应允许其主动剔除（等价于清理失效绑定），而不是把编辑整个锁死
-                var keptIds = request.InstanceIds.ToHashSet();
-                foreach (var binding in existing.Bindings.Where(b => keptIds.Contains(b.InstanceId)))
+                // 任务含用户无权限的服务器（管理员服务器）时禁止修改：保存会按前端表单重建绑定，
+                // 若不拦截会把裁剪隐藏的其他服务器绑定整体剔除，等价于普通用户改动共享任务影响他人/管理员的服务器。
+                // 需要个人版本时在编辑弹窗点「复制任务」创建无绑定副本，自行配置自己有权限的服务器。
+                if (existing.Bindings.Any(b => !HasPermission(b.InstanceId)))
                 {
-                    if (!HasPermission(binding.InstanceId))
-                    {
-                        forbidMessage = $"你对服务器 {binding.InstanceId} 没有操作权限";
-                        return null;
-                    }
+                    forbidMessage = "该任务包含你无权限的服务器，无法修改；可在编辑弹窗点击「复制任务」创建无服务器的副本，配置你有权限的服务器";
+                    return null;
                 }
             }
 
@@ -251,7 +314,9 @@ public class CronTaskController : ControllerBase
     [HttpPost("delete/{id}")]
     public IActionResult Delete(string id)
     {
+        string? forbidMessage = null;
         string? deletedName = null;
+        var unauthorized = new List<uint>();
         var result = _store.UpdateTasks(tasks =>
         {
             var task = tasks.FirstOrDefault(t => t.Id == id);
@@ -260,9 +325,23 @@ public class CronTaskController : ControllerBase
                 return null;
             }
 
-            // 不再逐绑定校验权限：任务被个别无权限/已删除服务器绑定导致无法编辑时，
-            // 也应允许普通用户整单删除（否则这类任务会陷入既不能编辑也不能删除的死角）。
-            // 多服任务为共享资源，删除动作对全部绑定生效，与既有删除语义一致。
+            if (!IsAdmin)
+            {
+                // 至少一台绑定服务器有权限才允许删除：无权限的任务在列表中本就不可见，
+                // 此校验只拦截对完全无权限任务的 API 直调，不产生「编辑/删除死角」。
+                // 个别无权限/已删除服务器绑定不再逐台校验，允许整单删除（多服任务为共享资源）。
+                if (!task.Bindings.Any(b => HasPermission(b.InstanceId)))
+                {
+                    forbidMessage = "你对该任务绑定的服务器都没有操作权限";
+                    return null;
+                }
+
+                unauthorized = task.Bindings
+                    .Where(b => !HasPermission(b.InstanceId))
+                    .Select(b => b.InstanceId)
+                    .ToList();
+            }
+
             tasks.Remove(task);
             deletedName = task.Name;
             return tasks;
@@ -270,7 +349,17 @@ public class CronTaskController : ControllerBase
 
         if (result == null)
         {
+            if (forbidMessage != null)
+            {
+                return Forbidden(forbidMessage);
+            }
+
             return BadRequestMsg("删除失败，未找到指定 ID 的任务");
+        }
+
+        if (!IsAdmin && unauthorized.Count > 0)
+        {
+            MSLX.SDK.MSLX.Logger.Warn($"[mslx-plugin-cron] 普通用户 {UserId} 删除任务 [{deletedName}]，其中 {unauthorized.Count} 台绑定服务器无操作权限");
         }
 
         MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 删除任务 [{deletedName}]");
@@ -283,6 +372,8 @@ public class CronTaskController : ControllerBase
     {
         string? forbidMessage = null;
         bool? newEnable = null;
+        string? toggledName = null;
+        var unauthorized = new List<uint>();
         var result = _store.UpdateTasks(tasks =>
         {
             var task = tasks.FirstOrDefault(t => t.Id == id);
@@ -300,13 +391,24 @@ public class CronTaskController : ControllerBase
                     return null;
                 }
 
-                // 与编辑一致：不再逐绑定校验权限。普通用户即使看不到无权限绑定，
-                // 也应能对任务整体启停——若要求每台绑定的权限，含个别权限被收回的服务器的
-                // 任务将无法启停（连停掉它都不行），形成操作死角。
+                // 至少一台绑定服务器有权限才允许整体启停：无权限的任务在列表中本就不可见，
+                // 此校验只拦截对完全无权限任务的 API 直调。含个别权限被收回的绑定不再逐台校验，
+                // 否则这类任务将无法启停（连停掉它都不行），形成操作死角。
+                if (!task.Bindings.Any(b => HasPermission(b.InstanceId)))
+                {
+                    forbidMessage = "你对该任务绑定的服务器都没有操作权限";
+                    return null;
+                }
+
+                unauthorized = task.Bindings
+                    .Where(b => !HasPermission(b.InstanceId))
+                    .Select(b => b.InstanceId)
+                    .ToList();
             }
 
             task.Enable = !task.Enable;
             newEnable = task.Enable;
+            toggledName = task.Name;
             return tasks;
         });
 
@@ -318,6 +420,11 @@ public class CronTaskController : ControllerBase
             }
 
             return BadRequestMsg("未找到指定 ID 的任务");
+        }
+
+        if (!IsAdmin && unauthorized.Count > 0)
+        {
+            MSLX.SDK.MSLX.Logger.Warn($"[mslx-plugin-cron] 普通用户 {UserId} {(newEnable == true ? "启用" : "停用")}任务 [{toggledName}]，其中 {unauthorized.Count} 台绑定服务器无操作权限");
         }
 
         return Ok(new ApiResponse<object> { Code = 200, Message = newEnable == true ? "任务已启用" : "任务已停用" });
@@ -484,7 +591,7 @@ public class CronTaskController : ControllerBase
         try
         {
             _migration.Restore();
-            return Ok(new ApiResponse<object> { Code = 200, Message = "已按迁移记录还原宿主任务（迁移记录保留，已导入任务不再出现在导入预览）" });
+            return Ok(new ApiResponse<object> { Code = 200, Message = "已按迁移记录还原宿主任务并停止插件调度（迁移记录保留，已导入任务不再出现在导入预览）" });
         }
         catch (Exception ex)
         {

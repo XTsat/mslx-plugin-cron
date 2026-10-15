@@ -92,6 +92,13 @@
             placement="center"
             :on-confirm="save"
         >
+            <!-- 复制任务：含无权限服务器的任务无法直接修改，借此创建无绑定副本后自行配置服务器 -->
+            <div v-if="editingId" class="flex justify-end mb-1">
+                <t-button variant="outline" theme="primary" size="small" :loading="copying" @click="doCopy">
+                    <template #icon><copy-icon /></template>
+                    复制任务
+                </t-button>
+            </div>
             <t-form :data="form" label-align="top" class="mt-4">
                 <t-form-item v-if="editingId" label="任务 ID">
                     <div
@@ -275,6 +282,7 @@ import {
     AddIcon,
     CloseIcon,
     CodeIcon,
+    CopyIcon,
     DeleteIcon,
     EditIcon,
     NotificationIcon,
@@ -359,6 +367,7 @@ const migrating = ref(false);
 const dialogVisible = ref(false);
 const editingId = ref<string | null>(null);
 const saving = ref(false);
+const copying = ref(false);
 
 // Cron 表达式生成器
 const showCronGen = ref(false);
@@ -510,7 +519,7 @@ const doRestoreMigration = async () => {
     if (restoring.value) return;
     const confirmDlg = DialogPlugin.confirm({
         header: '还原宿主任务',
-        body: '将按迁移记录把之前禁用的宿主「定时任务」恢复为原有启用状态。\n\n正常情况下宿主任务由本插件持续接管（保持禁用）；请仅在卸载插件或计划不再使用本插件时执行。\n\n还原后迁移记录保留，已导入任务不会再次出现在导入预览中。',
+        body: '将按迁移记录把之前禁用的宿主「定时任务」恢复为原有启用状态。\n\n正常情况下宿主任务由本插件持续接管（保持禁用）；请仅在卸载插件或计划不再使用本插件时执行。\n\n还原后插件调度器将停止（插件任务不再由本插件执行，执行权交还宿主），迁移记录保留，已导入任务不会再次出现在导入预览中。',
         theme: 'warning',
         confirmBtn: '确认还原',
         cancelBtn: '取消',
@@ -599,6 +608,23 @@ const save = async () => {
         MessagePlugin.error('保存失败: ' + (e?.message || e));
     } finally {
         saving.value = false;
+    }
+};
+
+// 复制任务：含无权限服务器的共享任务普通用户无法直接修改，复制为无绑定副本后自行配置服务器
+const doCopy = async () => {
+    if (!editingId.value || copying.value) return;
+    copying.value = true;
+    try {
+        const copied = await cronTaskApi.copy(editingId.value);
+        MessagePlugin.success('已复制为无绑定服务器的新任务，请在副本上配置你有权限的服务器');
+        await loadAll();
+        // 不关闭弹窗，直接切到副本：副本无绑定，勾选自己有权限的服务器后保存即可
+        openEdit(copied);
+    } catch (e: any) {
+        MessagePlugin.error('复制失败: ' + (e?.message || e));
+    } finally {
+        copying.value = false;
     }
 };
 

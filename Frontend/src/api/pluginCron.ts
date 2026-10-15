@@ -16,6 +16,7 @@ export interface CronTaskDefinition {
     enable: boolean;
     runWhenOffline: boolean;
     bindings: TaskBinding[];
+    creatorUserId?: string;
 }
 
 export interface CronTaskPayload {
@@ -80,6 +81,7 @@ export const cronTaskApi = {
     list: () => request.get<CronTaskDefinition[]>({ url: `${BASE}/list` }, NODE_REQUEST),
     get: (id: string) => request.get<CronTaskDefinition>({ url: `${BASE}/${id}` }, NODE_REQUEST),
     create: (data: CronTaskPayload) => request.post<string>({ url: `${BASE}/create`, data }, NODE_REQUEST),
+    copy: (id: string) => request.post<CronTaskDefinition>({ url: `${BASE}/copy/${id}` }, NODE_REQUEST),
     update: (id: string, data: CronTaskPayload) => request.post({ url: `${BASE}/update`, data: { id, ...data } }, NODE_REQUEST),
     remove: (id: string) => request.post({ url: `${BASE}/delete/${id}` }, NODE_REQUEST),
     toggle: (id: string) => request.post({ url: `${BASE}/toggle/${id}` }, NODE_REQUEST),

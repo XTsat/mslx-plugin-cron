@@ -83,7 +83,7 @@ public class PluginEntry : IPlugin
             _scheduler?.Stop();
             // 不再还原宿主任务：宿主进程每次停止（重启容器/更新 daemon）都会触发 OnUnload，
             // 若自动还原会把已接管的宿主任务重新启用，导致宿主调度器与插件调度器双重执行。
-            // 被接管的宿主任务保持禁用，由插件持续接管；如需还原请手动在宿主「定时任务」页启用。
+            // 被接管的宿主任务保持禁用，由插件持续接管；如需还原请使用页面「还原宿主任务」按钮（仅管理员）。
             SDK.MSLX.Logger.Info("[mslx-plugin-cron] 插件已卸载，调度已停止；宿主任务保持插件接管状态（不自动还原）");
         }
         catch (Exception ex)

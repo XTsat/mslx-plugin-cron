@@ -18,6 +18,12 @@ public class CronTaskDefinition
     [JsonProperty("enable")] public bool Enable { get; set; } = true;
     [JsonProperty("runWhenOffline")] public bool RunWhenOffline { get; set; } = true;
     [JsonProperty("bindings")] public List<TaskBinding> Bindings { get; set; } = new();
+    /// <summary>
+    /// 创建者（用户 ID）。用于区分「他人任务」与「自己未绑定服务器的副本」：
+    /// 普通用户的列表/单任务可见性 = 至少一台绑定有权限 或 自己是创建者，未绑定服务器的副本对创建者始终可见。
+    /// 迁移导入的历史任务无此字段（空串），可见性按绑定权限判断，行为与旧版本一致。
+    /// </summary>
+    [JsonProperty("creatorUserId")] public string CreatorUserId { get; set; } = "";
 }
 
 /// <summary>
