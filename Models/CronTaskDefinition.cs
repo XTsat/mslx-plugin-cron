@@ -151,6 +151,17 @@ public class MigrationPreviewItem
     public string TargetName { get; set; } = "";
 }
 
+/// <summary>
+/// 服务器设置页「定时任务绑定」：把单台服务器加入 / 移出任务绑定的请求体。
+/// </summary>
+public class TaskBindingRequest
+{
+    [Required(ErrorMessage = "任务 ID 不能为空")]
+    public string TaskId { get; set; } = "";
+
+    public uint InstanceId { get; set; }
+}
+
 public class CronValidateRequest
 {
     [Required(ErrorMessage = "Cron 表达式不能为空")]

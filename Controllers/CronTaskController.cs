@@ -430,6 +430,155 @@ public class CronTaskController : ControllerBase
         return Ok(new ApiResponse<object> { Code = 200, Message = newEnable == true ? "任务已启用" : "任务已停用" });
     }
 
+    /// <summary>
+    /// 服务器设置页「定时任务绑定」：把当前服务器加入指定任务的绑定。
+    /// 权限只要求对目标服务器有操作权限，不要求对任务已绑定的其它服务器有权限——
+    /// 服务器视角下用户只能操作自己有权的那台服务器，添加绑定不会改动任务定义与其它服务器绑定。
+    /// shell 任务会执行宿主机命令，普通用户不得扩大其执行范围（与创建/执行/启用仅管理员一致）。
+    /// </summary>
+    [HttpPost("bind")]
+    public IActionResult Bind([FromBody] TaskBindingRequest request)
+    {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(new ApiResponse<object>
+            {
+                Code = 400,
+                Message = string.Join("; ", ModelState.Values
+                    .SelectMany(v => v.Errors).Select(e => e.ErrorMessage))
+            });
+        }
+
+        if (request.InstanceId == 0)
+        {
+            return BadRequestMsg("服务器 ID 无效");
+        }
+
+        if (!HasPermission(request.InstanceId))
+        {
+            return Forbidden($"你对服务器 {request.InstanceId} 没有操作权限");
+        }
+
+        string? forbidMessage = null;
+        var alreadyBound = false;
+        string? boundTaskName = null;
+        var result = _store.UpdateTasks(tasks =>
+        {
+            var task = tasks.FirstOrDefault(t => t.Id == request.TaskId);
+            if (task == null)
+            {
+                return null;
+            }
+
+            if (!IsAdmin)
+            {
+                if (string.Equals(task.Type, "shell", StringComparison.OrdinalIgnoreCase))
+                {
+                    forbidMessage = "仅管理员可将服务器绑定到 shell 类型的定时任务";
+                    return null;
+                }
+
+                // 与列表可见性保持一致：至少一台绑定服务器有权限或本人创建，否则按「任务不存在」处理，
+                // 拦截对完全不可见任务的 API 直调
+                if (task.CreatorUserId != UserId && !task.Bindings.Any(b => HasPermission(b.InstanceId)))
+                {
+                    return null;
+                }
+            }
+
+            if (task.Bindings.Any(b => b.InstanceId == request.InstanceId))
+            {
+                alreadyBound = true;
+                return null;
+            }
+
+            task.Bindings.Add(new TaskBinding { InstanceId = request.InstanceId, LastRunTime = null });
+            boundTaskName = task.Name;
+            return tasks;
+        });
+
+        if (result == null)
+        {
+            if (forbidMessage != null)
+            {
+                return Forbidden(forbidMessage);
+            }
+
+            if (alreadyBound)
+            {
+                return Ok(new ApiResponse<object> { Code = 200, Message = "该任务已绑定本服务器" });
+            }
+
+            return NotFoundMsg("未找到指定 ID 的任务");
+        }
+
+        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 服务器 {request.InstanceId} 加入任务 [{boundTaskName}] 绑定");
+        return Ok(new ApiResponse<object> { Code = 200, Message = "已添加本服务器绑定" });
+    }
+
+    /// <summary>
+    /// 服务器设置页「定时任务绑定」：取消本服务器在指定任务上的绑定。
+    /// 只移除这一台服务器的绑定，任务本身与其它服务器不受影响；失去全部绑定的任务保留、暂停调度。
+    /// </summary>
+    [HttpPost("unbind")]
+    public IActionResult Unbind([FromBody] TaskBindingRequest request)
+    {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(new ApiResponse<object>
+            {
+                Code = 400,
+                Message = string.Join("; ", ModelState.Values
+                    .SelectMany(v => v.Errors).Select(e => e.ErrorMessage))
+            });
+        }
+
+        if (request.InstanceId == 0)
+        {
+            return BadRequestMsg("服务器 ID 无效");
+        }
+
+        if (!HasPermission(request.InstanceId))
+        {
+            return Forbidden($"你对服务器 {request.InstanceId} 没有操作权限");
+        }
+
+        var notBound = false;
+        string? unboundTaskName = null;
+        var result = _store.UpdateTasks(tasks =>
+        {
+            var task = tasks.FirstOrDefault(t => t.Id == request.TaskId);
+            if (task == null)
+            {
+                return null;
+            }
+
+            var binding = task.Bindings.FirstOrDefault(b => b.InstanceId == request.InstanceId);
+            if (binding == null)
+            {
+                notBound = true;
+                return null;
+            }
+
+            task.Bindings.Remove(binding);
+            unboundTaskName = task.Name;
+            return tasks;
+        });
+
+        if (result == null)
+        {
+            if (notBound)
+            {
+                return Ok(new ApiResponse<object> { Code = 200, Message = "该任务未绑定本服务器" });
+            }
+
+            return NotFoundMsg("未找到指定 ID 的任务");
+        }
+
+        MSLX.SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 服务器 {request.InstanceId} 取消任务 [{unboundTaskName}] 绑定");
+        return Ok(new ApiResponse<object> { Code = 200, Message = "已取消本服务器绑定" });
+    }
+
     /// <summary>立即执行一次（对全部绑定服务器，同步等待结果）</summary>
     [HttpPost("run/{id}")]
     public async Task<IActionResult> Run(string id)

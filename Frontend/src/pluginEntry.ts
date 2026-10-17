@@ -2,6 +2,7 @@ import { h, render } from 'vue';
 import { Button } from 'tdesign-vue-next';
 import { TimeIcon } from 'tdesign-icons-vue-next';
 import TaskListPage from './views/TaskListPage.vue';
+import InstanceCronBindTab from './views/InstanceCronBindTab.vue';
 
 export const pluginConfig = {
     name: 'CronBind',
@@ -24,7 +25,16 @@ export const pluginConfig = {
             },
         },
     ],
-    extensions: [],
+    // 服务器设置弹窗左侧新增「定时任务绑定」Tab：以服务器视角展示全部可用多服任务，
+    // 支持把本服务器加入任务绑定或取消绑定（反向绑定入口）
+    extensions: [
+        {
+            slot: 'instance-settings-tab',
+            component: InstanceCronBindTab,
+            label: '定时任务绑定',
+            icon: TimeIcon,
+        },
+    ],
 };
 
 // ===== 接管 /instance/cron =====
@@ -106,9 +116,47 @@ const ensureBackButton = () => {
     container.appendChild(host);
 };
 
+// ===== 实例设置 Tab 排序 =====
+// 宿主把插件扩展 Tab 统一追加在内置 Tab 之后，而「定时任务绑定」需要紧跟宿主「定时任务」。
+// 扩展注册不支持排序，因此设置弹窗渲染后把本插件的 Tab 节点移到「定时任务」后面；
+// 只移动本插件自己的节点，宿主按索引切换面板，与 DOM 顺序无关，不影响其点击逻辑。
+const reorderInstanceSettingsTab = () => {
+    document.querySelectorAll('.settings-dialog').forEach((dialog) => {
+        const bindTab = Array.from(dialog.querySelectorAll('.cursor-pointer')).find(
+            (el) => (el.textContent?.trim() || '') === '定时任务绑定',
+        );
+        if (!bindTab) return;
+
+        const list = bindTab.parentElement;
+        if (!list) return;
+
+        const hostCronTab = Array.from(list.children).find(
+            (el) => (el.textContent?.trim() || '') === '定时任务',
+        );
+        if (!hostCronTab || hostCronTab.nextElementSibling === bindTab) return;
+
+        list.insertBefore(bindTab, hostCronTab.nextSibling);
+    });
+};
+
 if (typeof window !== 'undefined') {
     lastSeenPath = window.location.pathname;
     window.setInterval(tryTick, 100);
+
+    // 设置弹窗按需插入 DOM（也可能被 Vue 复用/重排），用 MutationObserver 在渲染后立即纠正顺序
+    if (typeof MutationObserver !== 'undefined') {
+        let reorderScheduled = false;
+        const scheduleTabReorder = () => {
+            if (reorderScheduled) return;
+            reorderScheduled = true;
+            window.requestAnimationFrame(() => {
+                reorderScheduled = false;
+                reorderInstanceSettingsTab();
+            });
+        };
+        new MutationObserver(scheduleTabReorder).observe(document.body, { childList: true, subtree: true });
+        scheduleTabReorder();
+    }
 
     // 刷新时若锚点在 /instance/cron 也立即接管（等路由就绪后 replace）
     if (window.location.pathname === '/instance/cron' && getMode() !== MODE_HOST) {

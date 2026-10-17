@@ -85,6 +85,11 @@ export const cronTaskApi = {
     update: (id: string, data: CronTaskPayload) => request.post({ url: `${BASE}/update`, data: { id, ...data } }, NODE_REQUEST),
     remove: (id: string) => request.post({ url: `${BASE}/delete/${id}` }, NODE_REQUEST),
     toggle: (id: string) => request.post({ url: `${BASE}/toggle/${id}` }, NODE_REQUEST),
+    // 服务器设置页「定时任务绑定」：只增删单台服务器的绑定，不改动任务定义与其它服务器绑定
+    bind: (taskId: string, instanceId: number) =>
+        request.post({ url: `${BASE}/bind`, data: { taskId, instanceId } }, NODE_REQUEST),
+    unbind: (taskId: string, instanceId: number) =>
+        request.post({ url: `${BASE}/unbind`, data: { taskId, instanceId } }, NODE_REQUEST),
     run: (id: string) => request.post<TaskRunResult[]>({ url: `${BASE}/run/${id}`, timeout: 120 * 1000 }, NODE_REQUEST),
     validateCron: (cron: string) => request.post({ url: `${BASE}/validate-cron`, data: { cron } }, NODE_REQUEST),
     migrate: () => request.post({ url: `${BASE}/migrate` }, NODE_REQUEST),
