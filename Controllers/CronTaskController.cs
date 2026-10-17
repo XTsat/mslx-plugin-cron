@@ -193,7 +193,7 @@ public class CronTaskController : ControllerBase
             {
                 Name = source.Name,
                 Cron = source.Cron,
-                Type = source.Type,
+                Type = source.Type ?? "command",
                 Payload = source.Payload,
                 Enable = source.Enable,
                 RunWhenOffline = source.RunWhenOffline,
