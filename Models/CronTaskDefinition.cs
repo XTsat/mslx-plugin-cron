@@ -127,12 +127,18 @@ public class MigrationItem
     public bool Merged { get; set; }
 }
 
-/// <summary>导入预览（干跑，不写任何数据）：展示点击导入后会发生什么，供用户确认。</summary>
+/// <summary>迁移预览（干跑，不写任何数据）：展示全部宿主任务的导入去向与已导入状态，供迁移面板勾选确认。</summary>
 public class MigrationPreview
 {
     public bool Skipped { get; set; }
     public string? Reason { get; set; }
     public int Count { get; set; }
+    /// <summary>待导入（尚未被插件接管）的宿主任务数。</summary>
+    public int PendingCount { get; set; }
+    /// <summary>已导入（已被插件接管）的宿主任务数。</summary>
+    public int ImportedCount { get; set; }
+    /// <summary>迁移记录中可还原的宿主任务数；为 0 表示没有可还原项（还原按钮置灰）。</summary>
+    public int RestorableCount { get; set; }
     public List<MigrationPreviewItem> Items { get; set; } = new();
 }
 
@@ -145,10 +151,23 @@ public class MigrationPreviewItem
     public string Payload { get; set; } = "";
     public bool RunWhenOffline { get; set; }
     public uint InstanceId { get; set; }
+    /// <summary>宿主任务被接管前的启停状态（导入后插件任务沿用该状态）。</summary>
+    public bool OriginalEnable { get; set; }
+    /// <summary>true = 该宿主任务已由插件接管，仅供迁移面板展示与勾选状态回显，导入时忽略。</summary>
+    public bool Imported { get; set; }
     /// <summary>true = 并入已有多服任务；false = 新建任务。</summary>
     public bool Merged { get; set; }
     /// <summary>Merged=true 时并入的目标多服任务名称。</summary>
     public string TargetName { get; set; } = "";
+}
+
+/// <summary>
+/// 选择性导入请求：只导入用户在迁移面板中勾选的宿主任务。
+/// HostTaskIds 为空时按旧行为导入全部待接管任务，兼容未携带请求体的调用。
+/// </summary>
+public class MigrationMigrateRequest
+{
+    public List<string>? HostTaskIds { get; set; }
 }
 
 /// <summary>

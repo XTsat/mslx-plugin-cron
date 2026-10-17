@@ -16,29 +16,9 @@
                     <template #icon><rollback-icon /></template>
                     返回原版定时任务
                 </t-button>
-                <t-button
-                    v-if="isAdmin"
-                    variant="text"
-                    theme="default"
-                    :loading="restoring"
-                    @click="doRestoreMigration"
-                >
-                    <template #icon><rollback-icon /></template>
-                    还原宿主任务
-                </t-button>
-                <t-button
-                    v-if="!migration.migrated"
-                    theme="warning"
-                    variant="outline"
-                    :loading="migrating"
-                    @click="doMigrate"
-                >
+                <t-button v-if="isAdmin" variant="outline" @click="migrationVisible = true">
                     <template #icon><swap-icon /></template>
-                    一键迁移宿主任务
-                </t-button>
-                <t-button v-else variant="outline" :loading="migrating" @click="doMigrate">
-                    <template #icon><swap-icon /></template>
-                    导入宿主任务
+                    宿主任务迁移
                 </t-button>
                 <t-button variant="dashed" :loading="loading" @click="loadAll">
                     <template #icon><refresh-icon /></template>
@@ -82,6 +62,13 @@
                 <t-empty class="!bg-transparent" description="尚未配置任何多服定时任务" />
             </div>
         </div>
+
+        <!-- 宿主任务迁移二级面板：导入清单勾选 / 已导入回显 / 左下角还原 -->
+        <host-task-migration-dialog
+            v-model:visible="migrationVisible"
+            :instances="instances"
+            @changed="loadAll"
+        />
 
         <!-- 新建/编辑弹窗 -->
         <t-dialog
@@ -178,9 +165,6 @@
                     </div>
                     <div v-if="staleBindingIds.length > 0" class="text-xs text-[var(--td-error-color)] mt-1">
                         该任务仍绑定 {{ staleBindingIds.length }} 台已删除的服务器，取消勾选或点「移除」即可清理
-                    </div>
-                    <div class="text-xs text-[var(--td-text-color-secondary)] mt-1">
-                        可不选择服务器直接保存，创建后随时编辑绑定；清空全部绑定后任务暂停调度，待重新绑定恢复
                     </div>
                 </t-form-item>
 
@@ -281,7 +265,6 @@ import { Button, DialogPlugin, MessagePlugin, Switch, Tag } from 'tdesign-vue-ne
 import {
     AddIcon,
     CloseIcon,
-    CodeIcon,
     CopyIcon,
     DeleteIcon,
     EditIcon,
@@ -290,7 +273,6 @@ import {
     RefreshIcon,
     RollbackIcon,
     ServerIcon,
-    StopCircleIcon,
     SwapIcon,
     TimeIcon,
 } from 'tdesign-icons-vue-next';
@@ -300,39 +282,13 @@ import {
     type CronTaskDefinition,
     type CronTaskPayload,
     type InstanceItem,
-    type MigrationStatus,
 } from '../api/pluginCron';
 import CronGenerator from '../components/CronGenerator.vue';
+import HostTaskMigrationDialog from '../components/HostTaskMigrationDialog.vue';
 import { generateAdvanceNoticePayload, shiftCronMinutes } from '../utils/cronHelper';
+import { TASK_TYPE_LABELS as TYPE_LABELS, taskTypeColor as getColorByType, taskTypeIcon as getIconByType, formatDateTime as formatTime } from '../utils/cronTaskMeta';
 
 // ===== 常量 =====
-
-const TYPE_LABELS: Record<string, string> = {
-    command: '发送命令 (Command)',
-    backup: '备份存档 (Backup)',
-    start: '开启服务器 (Start)',
-    stop: '停止服务器 (Stop)',
-    restart: '重启服务器 (Restart)',
-    shell: '执行脚本 (Shell Command)',
-};
-
-const getColorByType = (type: string) => {
-    const t = type.toLowerCase();
-    if (t === 'start') return 'success';
-    if (t === 'stop') return 'danger';
-    if (t === 'restart') return 'warning';
-    if (t === 'shell') return 'default';
-    return 'primary';
-};
-
-const getIconByType = (type: string) => {
-    const t = type.toLowerCase();
-    if (t === 'start') return PlayCircleIcon;
-    if (t === 'stop') return StopCircleIcon;
-    if (t === 'restart') return RefreshIcon;
-    if (t === 'shell') return CodeIcon;
-    return CodeIcon;
-};
 
 const userStore = (window as any).MSLX_Stores?.getUserStore?.();
 const isAdmin = computed(() => !!userStore?.isAdmin);
@@ -349,20 +305,12 @@ const taskTypeOptions = computed(() => {
     return options;
 });
 
-const pad = (n: number) => String(n).padStart(2, '0');
-const formatTime = (t?: string | null): string => {
-    if (!t) return '—';
-    const d = new Date(t);
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-};
-
 // ===== 状态 =====
 
 const loading = ref(false);
 const tasks = ref<CronTaskDefinition[]>([]);
 const instances = ref<InstanceItem[]>([]);
-const migration = ref<MigrationStatus>({ migrated: false, taskCount: 0, reason: '' });
-const migrating = ref(false);
+const migrationVisible = ref(false);
 
 const dialogVisible = ref(false);
 const editingId = ref<string | null>(null);
@@ -434,108 +382,6 @@ const loadAll = async () => {
     } finally {
         loading.value = false;
     }
-};
-
-// ===== 迁移 =====
-
-const doMigrate = async () => {
-    if (migrating.value) return;
-    migrating.value = true;
-    try {
-        // 第一步：请求导入预览（后端干跑，不写任何数据）
-        const preview: any = await cronTaskApi.migratePreview();
-        if (preview?.skipped || !preview?.items?.length) {
-            MessagePlugin.info(preview?.reason || '没有新的宿主任务需要导入');
-            return;
-        }
-
-        const isIncremental = migration.value.migrated;
-
-        // 第二步：预览面板展示将导入的内容，用户确认后才真正导入
-        const shown = preview.items.slice(0, 50);
-        const more = preview.items.length - shown.length;
-        const items = shown
-            .map(
-                (it: any) =>
-                    `📥 ${it.name}（${instanceName(it.instanceId)}）— ${it.merged ? `并入已有任务「${it.targetName}」` : '新建任务'}`,
-            )
-            .join('\n');
-        const note = isIncremental
-            ? '将从宿主「定时任务」页面导入以下新任务。相同规则的任务会自动合并到已有多服任务的绑定服务器中；新导入的宿主任务将被禁用（由本插件接管调度）。卸载插件后宿主任务保持接管状态、不会自动还原，如需还原请在宿主「定时任务」页面手动启用。'
-            : '迁移将把宿主现有的「服务器绑定任务」按（类型 + Cron + 内容）归并转换为多服任务。迁移后宿主旧任务会被立即禁用（失效），由本插件接管这些任务的调度与执行。卸载插件后宿主任务保持接管状态、不会自动还原，如需还原请在宿主「定时任务」页面手动启用。';
-
-        const confirmDlg = DialogPlugin.confirm({
-            header: isIncremental ? '导入宿主新任务' : '迁移预览',
-            body: () =>
-                h('div', { style: 'max-height: 340px; overflow: auto; line-height: 1.8;' }, [
-                    h(
-                        'div',
-                        { style: 'font-size: 12px; color: var(--td-text-color-secondary); margin-bottom: 8px;' },
-                        note,
-                    ),
-                    h(
-                        'div',
-                        { style: 'white-space: pre-line;' },
-                        items + (more > 0 ? `\n… 其余 ${more} 个任务不再展示` : ''),
-                    ),
-                ]),
-            confirmBtn: '确认导入',
-            cancelBtn: '取消',
-            onConfirm: async () => {
-                confirmDlg.destroy();
-                try {
-                    const res: any = await cronTaskApi.migrate();
-                    if (res?.skipped) {
-                        MessagePlugin.info(res.reason || '没有新的宿主任务需要导入');
-                    } else {
-                        MessagePlugin.success('导入完成');
-                    }
-                    await Promise.all([loadAll(), loadMigrationStatus()]);
-                } catch (e: any) {
-                    MessagePlugin.error('导入失败: ' + (e?.message || '未知错误'));
-                }
-            },
-        });
-    } catch (e: any) {
-        MessagePlugin.error('获取导入预览失败: ' + (e?.message || '未知错误'));
-    } finally {
-        migrating.value = false;
-    }
-};
-
-const loadMigrationStatus = async () => {
-    try {
-        migration.value = (await cronTaskApi.migrateStatus()) || { migrated: false, taskCount: 0 };
-    } catch {
-        migration.value = { migrated: true, taskCount: 0 };
-    }
-};
-
-// ===== 还原宿主任务（兜底，仅管理员） =====
-
-const restoring = ref(false);
-
-const doRestoreMigration = async () => {
-    if (restoring.value) return;
-    const confirmDlg = DialogPlugin.confirm({
-        header: '还原宿主任务',
-        body: '将按迁移记录把之前禁用的宿主「定时任务」恢复为原有启用状态。\n\n正常情况下宿主任务由本插件持续接管（保持禁用）；请仅在卸载插件或计划不再使用本插件时执行。\n\n还原后插件调度器将停止（插件任务不再由本插件执行，执行权交还宿主），迁移记录保留，已导入任务不会再次出现在导入预览中。',
-        theme: 'warning',
-        confirmBtn: '确认还原',
-        cancelBtn: '取消',
-        onConfirm: async () => {
-            confirmDlg.destroy();
-            restoring.value = true;
-            try {
-                await cronTaskApi.migrateRestore();
-                MessagePlugin.success('已还原宿主任务');
-            } catch (e: any) {
-                MessagePlugin.error('还原失败: ' + (e?.message || '未知错误'));
-            } finally {
-                restoring.value = false;
-            }
-        },
-    });
 };
 
 // ===== 返回原版定时任务 =====
@@ -887,6 +733,6 @@ const columns = () => [
 // ===== 初始化 =====
 
 onMounted(async () => {
-    await Promise.all([loadAll(), loadMigrationStatus()]);
+    await loadAll();
 });
 </script>

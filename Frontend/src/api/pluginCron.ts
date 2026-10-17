@@ -29,13 +29,6 @@ export interface CronTaskPayload {
     instanceIds: number[];
 }
 
-export interface MigrationStatus {
-    migrated: boolean;
-    reason?: string;
-    taskCount: number;
-    migratedAt?: string | null;
-}
-
 export interface MigrationPreviewItem {
     hostTaskId: string;
     name: string;
@@ -44,6 +37,10 @@ export interface MigrationPreviewItem {
     payload: string;
     runWhenOffline: boolean;
     instanceId: number;
+    /** 宿主任务被接管前的启停状态 */
+    originalEnable: boolean;
+    /** 已被插件接管：面板中回显为选中，导入时忽略 */
+    imported: boolean;
     merged: boolean;
     targetName: string;
 }
@@ -52,7 +49,20 @@ export interface MigrationPreview {
     skipped: boolean;
     reason?: string;
     count: number;
+    pendingCount: number;
+    importedCount: number;
+    /** 迁移记录中可还原的宿主任务数（0 时还原按钮置灰） */
+    restorableCount: number;
     items: MigrationPreviewItem[];
+}
+
+export interface MigrationResult {
+    skipped: boolean;
+    reason?: string;
+    migratedCount: number;
+    failedCount: number;
+    taskCount: number;
+    items: { name: string; instanceId: number; merged: boolean }[];
 }
 
 export interface TaskRunResult {
@@ -92,9 +102,10 @@ export const cronTaskApi = {
         request.post({ url: `${BASE}/unbind`, data: { taskId, instanceId } }, NODE_REQUEST),
     run: (id: string) => request.post<TaskRunResult[]>({ url: `${BASE}/run/${id}`, timeout: 120 * 1000 }, NODE_REQUEST),
     validateCron: (cron: string) => request.post({ url: `${BASE}/validate-cron`, data: { cron } }, NODE_REQUEST),
-    migrate: () => request.post({ url: `${BASE}/migrate` }, NODE_REQUEST),
+    // 导入宿主任务：hostTaskIds 为面板中勾选的任务；省略该字段表示导入全部待接管任务（兼容旧调用）
+    migrate: (hostTaskIds?: string[]) =>
+        request.post<MigrationResult>({ url: `${BASE}/migrate`, data: { hostTaskIds } }, NODE_REQUEST),
     migratePreview: () => request.post<MigrationPreview>({ url: `${BASE}/migrate-preview` }, NODE_REQUEST),
-    migrateStatus: () => request.get<MigrationStatus>({ url: `${BASE}/migrate-status` }, NODE_REQUEST),
     migrateRestore: () => request.post({ url: `${BASE}/migrate-restore` }, NODE_REQUEST),
 };
 

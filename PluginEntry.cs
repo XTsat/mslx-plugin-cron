@@ -8,9 +8,9 @@ namespace MSLX.Plugin.Cron;
 
 /// <summary>
 /// 多服定时任务插件：任务绑定多服务器。
-/// 创建任务并选择多台服务器启用；支持从宿主「服务器绑定任务」一键迁移（需用户确认，
+/// 创建任务并选择多台服务器启用；支持从宿主「服务器绑定任务」迁移（需用户确认，
 /// 迁移后宿主旧任务被禁用、由插件自调度器按每台服务器的 LastRunTime 独立调度）；
-/// 卸载时还原宿主任务。
+/// 卸载时不自动还原宿主任务。
 /// </summary>
 public class PluginEntry : IPlugin
 {
@@ -63,7 +63,7 @@ public class PluginEntry : IPlugin
                 }
                 else
                 {
-                    SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 尚未迁移，等待用户在页面确认后一键迁移（原因: {status.Reason}）");
+                    SDK.MSLX.Logger.Info($"[mslx-plugin-cron] 尚未迁移，等待用户在迁移面板确认后导入（原因: {status.Reason}）");
                 }
             }
 
@@ -83,7 +83,7 @@ public class PluginEntry : IPlugin
             _scheduler?.Stop();
             // 不再还原宿主任务：宿主进程每次停止（重启容器/更新 daemon）都会触发 OnUnload，
             // 若自动还原会把已接管的宿主任务重新启用，导致宿主调度器与插件调度器双重执行。
-            // 被接管的宿主任务保持禁用，由插件持续接管；如需还原请使用页面「还原宿主任务」按钮（仅管理员）。
+            // 被接管的宿主任务保持禁用，由插件持续接管；如需还原请使用「宿主任务迁移」面板左下角「还原任务」按钮（仅管理员）。
             SDK.MSLX.Logger.Info("[mslx-plugin-cron] 插件已卸载，调度已停止；宿主任务保持插件接管状态（不自动还原）");
         }
         catch (Exception ex)

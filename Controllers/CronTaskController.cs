@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using MSLX.Plugin.Cron.Models;
 using MSLX.Plugin.Cron.Services;
 using MSLX.SDK.Models;
@@ -648,9 +649,9 @@ public class CronTaskController : ControllerBase
         }
     }
 
-    /// <summary>一键迁移宿主旧任务（仅管理员）</summary>
+    /// <summary>导入宿主旧任务（仅管理员）；可携带勾选的宿主任务 ID 做选择性导入</summary>
     [HttpPost("migrate")]
-    public IActionResult Migrate()
+    public IActionResult Migrate([FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] MigrationMigrateRequest? request)
     {
         if (!IsAdmin)
         {
@@ -659,7 +660,7 @@ public class CronTaskController : ControllerBase
 
         try
         {
-            var result = _migration.Migrate();
+            var result = _migration.Migrate(request?.HostTaskIds);
             var message = result.Skipped
                 ? result.Reason ?? "无需迁移"
                 : result.FailedCount > 0
@@ -679,7 +680,7 @@ public class CronTaskController : ControllerBase
         }
     }
 
-    /// <summary>导入预览（干跑）：扫描宿主任务并计算去向（并入/新建），不写任何数据（仅管理员）</summary>
+    /// <summary>导入预览（干跑）：扫描全部宿主任务并计算去向（并入/新建）与已导入状态，不写任何数据（仅管理员）</summary>
     [HttpPost("migrate-preview")]
     public IActionResult MigratePreview()
     {
@@ -725,9 +726,10 @@ public class CronTaskController : ControllerBase
     }
 
     /// <summary>
-    /// 手动还原全部宿主任务（仅管理员，兜底）：把迁移时禁用的宿主任务按原启停状态恢复。
+    /// 手动还原全部宿主任务（仅管理员，兜底）：把迁移时禁用的宿主任务按原启停状态恢复，
+    /// 同时清空所有多服任务的服务器绑定（任务定义保留），确保插件重载后也不会再执行。
     /// 卸载插件前的应急通道——正常情况下宿主任务由插件持续接管、保持禁用。
-    /// 迁移动态为增量幂等设计，还原后保留迁移记录，已导入任务不会重复出现在导入预览中。
+    /// 迁移动态为增量幂等设计，还原后保留迁移记录，已导入任务不会重复导入。
     /// </summary>
     [HttpPost("migrate-restore")]
     public IActionResult MigrateRestore()
@@ -740,7 +742,7 @@ public class CronTaskController : ControllerBase
         try
         {
             _migration.Restore();
-            return Ok(new ApiResponse<object> { Code = 200, Message = "已按迁移记录还原宿主任务并停止插件调度（迁移记录保留，已导入任务不再出现在导入预览）" });
+            return Ok(new ApiResponse<object> { Code = 200, Message = "已还原宿主任务，停止插件调度并清空服务器绑定（任务定义与迁移记录保留）" });
         }
         catch (Exception ex)
         {
